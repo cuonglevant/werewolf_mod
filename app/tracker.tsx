@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AppState,
   Modal,
   Pressable,
   ScrollView,
@@ -21,6 +22,13 @@ import { getRoleLabel } from '@/src/i18n/roles';
 import { uiText } from '@/src/i18n/ui';
 import { useGame } from '@/src/state/game-context';
 
+import { NightGuide } from '@/components/tracker/night-guide';
+import { PlayerGrid } from '@/components/tracker/player-grid';
+import { StatsHeader } from '@/components/tracker/stats-header';
+import { TimerDisplay } from '@/components/tracker/timer-display';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+
 const NIGHT_PHASES = [
   'Werewolves',
   'Seer',
@@ -38,18 +46,6 @@ const DEFAULT_PHASE_SECONDS = 45;
 const DEFAULT_DISCUSSION_SECONDS = 90;
 const DEFAULT_VOTE_SECONDS = 15;
 const DEFAULT_LYNCH_SECONDS = 30;
-
-const COLORS = {
-  bg: '#F4F6FB',
-  surface: '#FFFFFF',
-  surfaceMuted: '#F8FAFF',
-  border: '#D6DCEB',
-  text: '#1D2433',
-  textMuted: '#667089',
-  accent: '#B63A30',
-  accentSoft: '#FBEDEC',
-  disabled: '#C8D0E0',
-};
 
 type NightPhaseName = (typeof NIGHT_PHASES)[number];
 
@@ -468,20 +464,22 @@ const normalizeDuration = (value: string) => {
   return parsed;
 };
 
-const NIGHT_TIMER_PHASES: NightPhaseName[] = [
-  'Werewolves',
-  'Seer',
-  'Bodyguard',
-  'Witch',
-  'Cupid',
-  'Whitewolf',
-  'The Doppelgänger',
-];
-
 const DAY_TIMER_PHASES = ['Discussion', 'Vote', 'Lynch'] as const;
 type DayTimerPhase = (typeof DAY_TIMER_PHASES)[number];
 const isDayTimerPhase = (phase: NightPhaseName): phase is DayTimerPhase =>
   DAY_TIMER_PHASES.includes(phase as DayTimerPhase);
+
+const buildInitialPhaseSyncTimestamps = () => {
+  const now = Date.now();
+
+  return NIGHT_PHASES.reduce(
+    (accumulator, phase) => {
+      accumulator[phase] = now;
+      return accumulator;
+    },
+    {} as Record<NightPhaseName, number>,
+  );
+};
 
 const VI_PHASE_LABELS: Record<NightPhaseName, string> = {
   Werewolves: 'Ma Sói',
@@ -581,9 +579,9 @@ const STATUS_BADGE_ICONS = {
 const SPECIAL_ROLE_SET = new Set<RoleName>(SPECIAL_ROLES);
 
 export default function TrackerScreen() {
+  // NOSONAR
   const { width } = useWindowDimensions();
   const isNarrowScreen = width < 390;
-  const gridItemWidth = isNarrowScreen ? '100%' : '48%';
 
   const {
     tracker,
@@ -596,7 +594,10 @@ export default function TrackerScreen() {
     toggleLanguage,
   } = useGame();
   const t = uiText[language].tracker;
-  const localizedRoleLabel = (role: RoleName) => getRoleLabel(language, role);
+  const localizedRoleLabel = useCallback(
+    (role: RoleName) => getRoleLabel(language, role),
+    [language],
+  );
   const phaseLabel = (phase: NightPhaseName) =>
     language === 'vi' ? VI_PHASE_LABELS[phase] : phase;
   const actionNoteText = (action: PlayerNightAction, playerName: string) => {
@@ -617,7 +618,6 @@ export default function TrackerScreen() {
   const [dayTimerInputs, setDayTimerInputs] = useState<
     Record<DayTimerPhase, string>
   >(buildDefaultDayTimerInputs);
-  const [showNightTimers, setShowNightTimers] = useState(false);
   const [specialChecklistState, setSpecialChecklistState] = useState(
     buildInitialSpecialChecklistState,
   );
@@ -714,6 +714,7 @@ export default function TrackerScreen() {
   const aliveCount = tracker.filter((player) => player.alive).length;
   const deadCount = tracker.length - aliveCount;
   const lastAppliedAction = appliedActionHistory[0] ?? null;
+  const hasLastAppliedAction = lastAppliedAction !== null;
 
   const hasRunningTimer = useMemo(
     () => NIGHT_PHASES.some((phase) => phaseTimers[phase].running),
@@ -791,12 +792,354 @@ export default function TrackerScreen() {
     return { grouped, nights };
   }, [nightLog]);
 
-  const selectedNightLogEntries =
-    selectedNightLog === null
-      ? []
-      : (nightLogByNight.grouped[selectedNightLog] ?? []);
+  const handleToggleLanguage = useCallback(() => {
+    toggleLanguage();
+  }, [toggleLanguage]);
 
-  const availableNightActions = useMemo(() => {
+  const handlePlayerPress = useCallback((playerId: string) => {
+    setSelectedPlayerId(playerId);
+  }, []);
+
+  const getPlayerStatusIcons = useCallback(
+    (player: { id: string; role: RoleName }) => {
+      const icons: string[] = [];
+      if (seerCheckedPlayerIds.includes(player.id))
+        icons.push(STATUS_BADGE_ICONS.checked);
+      if (enchantressMarkedPlayerIds.includes(player.id))
+        icons.push(STATUS_BADGE_ICONS.enchanted);
+      if (doppelCopiedPlayerIds.includes(player.id))
+        icons.push(STATUS_BADGE_ICONS.copied);
+      if (cupidLinkedPlayerIds.includes(player.id))
+        icons.push(STATUS_BADGE_ICONS.lover);
+      if (bodyguardProtectedPlayerIds.includes(player.id))
+        icons.push(STATUS_BADGE_ICONS.protected);
+      if (player.role === 'Strongman') {
+        icons.push(
+          strongmanSurvivedPlayerIds.includes(player.id)
+            ? STATUS_BADGE_ICONS.strongmanPending
+            : STATUS_BADGE_ICONS.strongman,
+        );
+      }
+      if (pendingCursedTransformPlayerIds.includes(player.id))
+        icons.push(STATUS_BADGE_ICONS.cursedPending);
+      if (player.role === 'Elder') icons.push(STATUS_BADGE_ICONS.elder);
+      if (pendingHunterRevenge?.targetId === player.id)
+        icons.push(STATUS_BADGE_ICONS.hunterTarget);
+      return icons;
+    },
+    [
+      seerCheckedPlayerIds,
+      enchantressMarkedPlayerIds,
+      doppelCopiedPlayerIds,
+      cupidLinkedPlayerIds,
+      bodyguardProtectedPlayerIds,
+      strongmanSurvivedPlayerIds,
+      pendingCursedTransformPlayerIds,
+      pendingHunterRevenge,
+    ],
+  );
+
+  const getRoleIconForPlayer = useCallback((role: RoleName) => {
+    return SPECIAL_ROLE_ICONS[role];
+  }, []);
+
+  const localizedRoleLabelCallback = useCallback(
+    (role: RoleName) => {
+      return localizedRoleLabel(role);
+    },
+    [localizedRoleLabel],
+  );
+
+  const statsHeaderT = useMemo(
+    () => ({
+      alive: t.alive,
+      dead: t.dead,
+      langButton: uiText[language].langButton,
+    }),
+    [t.alive, t.dead, language],
+  );
+
+  const nightGuideT = useMemo(
+    () => ({
+      nightGuide: t.nightGuideTitle,
+      night: t.currentNight,
+    }),
+    [t.nightGuideTitle, t.currentNight],
+  );
+
+  const timerT = useMemo(
+    () => ({
+      set: t.set,
+      pause: t.pause,
+      start: t.start,
+      reset: t.reset,
+    }),
+    [t.set, t.pause, t.start, t.reset],
+  );
+
+  const localizedNightGuideStep = useCallback(
+    (step: NightGuideStep) => {
+      if (language !== 'vi') {
+        return step;
+      }
+
+      const doppel = localizedRoleLabel('The Doppelgänger');
+      const thief = localizedRoleLabel('Thief');
+      const cupid = localizedRoleLabel('Cupid');
+      const bodyguard = localizedRoleLabel('Bodyguard');
+      const werewolf = localizedRoleLabel('Werewolf');
+      const strongman = localizedRoleLabel('Strongman');
+      const cursed = localizedRoleLabel('Cursed');
+      const whitewolf = localizedRoleLabel('Whitewolf');
+      const witch = localizedRoleLabel('Witch');
+      const enchantress = localizedRoleLabel('Enchantress');
+      const hunter = localizedRoleLabel('Hunter');
+      const seer = localizedRoleLabel('Seer');
+      const fox = localizedRoleLabel('Fox');
+      const littleGirl = localizedRoleLabel('Little Girl');
+
+      switch (step.id) {
+        case 'sleep':
+          return {
+            ...step,
+            title: 'Bắt đầu đêm',
+            call: 'Mọi người nhắm mắt. Quản trò xác nhận yên lặng.',
+            notes: 'Dừng ngắn trước mỗi lượt gọi vai để chuyển nhịp rõ ràng.',
+          };
+        case 'doppelganger':
+          return {
+            ...step,
+            title: `${doppel} chọn`,
+            call: `${doppel} thức dậy và chỉ một người để sao chép.`,
+            notes: 'Ghi lại mục tiêu được sao chép một cách kín đáo.',
+          };
+        case 'thief':
+          return {
+            ...step,
+            title: `${thief} quyết định`,
+            call: `${thief} thức dậy và có thể đổi vai nếu bàn chơi cho phép.`,
+            notes: 'Chỉ áp dụng ở đêm đầu tiên.',
+          };
+        case 'cupid':
+          return {
+            ...step,
+            title: `${cupid} liên kết`,
+            call: `${cupid} thức dậy và chọn hai tình nhân.`,
+            notes: `Báo cho hai tình nhân trong im lặng rồi ${cupid} ngủ lại.`,
+          };
+        case 'bodyguard':
+          return {
+            ...step,
+            title: `${bodyguard} bảo vệ`,
+            call: `${bodyguard} thức dậy và chọn một người để bảo vệ.`,
+            notes: `Người được bảo vệ sống sót trước đòn tấn công của ${werewolf} trong đêm.`,
+          };
+        case 'werewolves':
+          return {
+            ...step,
+            title: `${werewolf} hành động`,
+            call: `${werewolf} thức dậy, chọn một mục tiêu rồi ngủ lại.`,
+            notes: `Dùng hành động trên thẻ người chơi để ghi nhận. ${strongman} và ${cursed} sẽ tự động cập nhật ở đêm kế.`,
+          };
+        case 'whitewolf':
+          return {
+            ...step,
+            title: `${whitewolf} hành động`,
+            call: `${whitewolf} thức dậy ở các đêm chẵn để hành động đặc biệt theo luật bàn.`,
+            notes: `Thường xử lý ngay sau ${werewolf} ở các đêm 2, 4, 6... nếu bàn chơi không dùng thứ tự khác.`,
+          };
+        case 'witch':
+          return {
+            ...step,
+            title: `${witch} dùng thuốc`,
+            call: `${witch} thức dậy và có thể cứu hoặc giết theo số thuốc còn lại.`,
+            notes: `Dùng hành động modal sẽ tự cập nhật checklist của ${witch}.`,
+          };
+        case 'enchantress':
+          return {
+            ...step,
+            title: `${enchantress} phù phép`,
+            call: `${enchantress} thức dậy và chọn một người để phù phép theo luật bàn chơi.`,
+            notes: `Xử lý hiệu ứng phù phép theo biến thể mà bàn chơi đang dùng.`,
+          };
+        case 'hunter':
+          return {
+            ...step,
+            title: `${hunter} chỉ định mục tiêu`,
+            call: `${hunter} thức dậy và chọn một mục tiêu trả thù nếu bàn chơi dùng luật này.`,
+            notes: `Khi ${hunter} chết, mục tiêu đã chỉ định sẽ chết ngay lập tức.`,
+          };
+        case 'seer':
+          return {
+            ...step,
+            title: `${seer} soi`,
+            call: `${seer} thức dậy và soi một người chơi.`,
+            notes: `Tiết lộ thông tin kín cho ${seer} rồi ${seer} ngủ lại.`,
+          };
+        case 'fox':
+          return {
+            ...step,
+            title: `${fox} cảm nhận`,
+            call: `${fox} thức dậy và dùng năng lực cảm nhận nếu bàn có bật luật này.`,
+            notes: `Bỏ qua nếu bàn chơi không dùng năng lực ${fox} ban đêm.`,
+          };
+        case 'little-girl':
+          return {
+            ...step,
+            title: `Nhắc ${littleGirl}`,
+            call: `${littleGirl} chỉ được nhìn trộm nếu bàn chơi cho phép.`,
+            notes: 'Áp dụng thống nhất quy tắc công bằng của nhóm.',
+          };
+        case 'resolve':
+          return {
+            ...step,
+            title: 'Tổng kết & Trời sáng',
+            call: 'Xử lý hiệu ứng rồi thông báo trời sáng và kết quả.',
+            notes: 'Ghi log diễn biến chính trước khi vào thảo luận/bỏ phiếu.',
+          };
+        default:
+          return step;
+      }
+    },
+    [language, localizedRoleLabel],
+  );
+
+  const nightGuideSteps = useMemo(() => {
+    const aliveRoles = new Set(
+      tracker.filter((player) => player.alive).map((player) => player.role),
+    );
+    const rolesInGame = new Set(tracker.map((player) => player.role));
+
+    return NIGHT_GUIDE_STEPS.filter((step) => {
+      if (step.evenNightOnly && currentNight % 2 !== 0) {
+        return false;
+      }
+
+      if (!step.requiresRole) {
+        return !step.firstNightOnly || currentNight === 1;
+      }
+
+      const shouldCallRole = SPECIAL_ROLE_SET.has(step.requiresRole)
+        ? rolesInGame.has(step.requiresRole)
+        : aliveRoles.has(step.requiresRole);
+
+      return shouldCallRole && (!step.firstNightOnly || currentNight === 1);
+    });
+  }, [currentNight, tracker]);
+
+  const getConfiguredDurationForPhase = useCallback(
+    (phase: NightPhaseName) => {
+      if (isDayTimerPhase(phase)) {
+        return normalizeDuration(dayTimerInputs[phase]);
+      }
+
+      return normalizeDuration(phaseDurationInput);
+    },
+    [dayTimerInputs, phaseDurationInput],
+  );
+
+  const togglePhaseTimer = useCallback(
+    (phase: NightPhaseName) => {
+      const configuredDuration = getConfiguredDurationForPhase(phase);
+      const now = Date.now();
+
+      setPhaseTimers((previousTimers) => {
+        const current = previousTimers[phase];
+        const shouldRestart = current.remaining === 0;
+
+        lastPhaseSyncTimestampRef.current[phase] = now;
+
+        return {
+          ...previousTimers,
+          [phase]: {
+            remaining: shouldRestart ? configuredDuration : current.remaining,
+            running: !current.running,
+          },
+        };
+      });
+    },
+    [getConfiguredDurationForPhase],
+  );
+
+  const resetPhaseTimer = useCallback(
+    (phase: NightPhaseName) => {
+      const configuredDuration = getConfiguredDurationForPhase(phase);
+      lastPhaseSyncTimestampRef.current[phase] = Date.now();
+
+      setPhaseTimers((previousTimers) => ({
+        ...previousTimers,
+        [phase]: {
+          remaining: configuredDuration,
+          running: false,
+        },
+      }));
+    },
+    [getConfiguredDurationForPhase],
+  );
+
+  const selectedNightLogEntries = useMemo(() => {
+    if (selectedNightLog === null) {
+      return [];
+    }
+
+    return nightLogByNight.grouped[selectedNightLog] ?? [];
+  }, [nightLogByNight, selectedNightLog]);
+
+  const localizedNightGuideSteps = useMemo(() => {
+    return nightGuideSteps.map((step) => {
+      const localized = localizedNightGuideStep(step);
+      return {
+        id: localized.id,
+        title: localized.title,
+        call: localized.call,
+        notes: localized.notes,
+      };
+    });
+  }, [nightGuideSteps, localizedNightGuideStep]);
+
+  const handleToggleTimer = useCallback(
+    (phase: NightPhaseName) => {
+      togglePhaseTimer(phase);
+    },
+    [togglePhaseTimer],
+  );
+
+  const handleResetTimer = useCallback(
+    (phase: NightPhaseName) => {
+      resetPhaseTimer(phase);
+    },
+    [resetPhaseTimer],
+  );
+
+  const handleDurationChange = useCallback(
+    (phase: DayTimerPhase, value: string) => {
+      setDayTimerInputs((prev) => ({ ...prev, [phase]: value }));
+    },
+    [],
+  );
+
+  const applyDayTimerDuration = useCallback(
+    (phase: DayTimerPhase) => {
+      const configuredDuration = normalizeDuration(dayTimerInputs[phase]);
+      lastPhaseSyncTimestampRef.current[phase] = Date.now();
+
+      setDayTimerInputs((previous) => ({
+        ...previous,
+        [phase]: String(configuredDuration),
+      }));
+
+      setPhaseTimers((previousTimers) => ({
+        ...previousTimers,
+        [phase]: {
+          remaining: configuredDuration,
+          running: false,
+        },
+      }));
+    },
+    [dayTimerInputs],
+  );
+
+  const availableActions = useMemo(() => {
     if (!selectedPlayer) {
       return [];
     }
@@ -867,33 +1210,83 @@ export default function TrackerScreen() {
     ];
   }, [counts, selectedPlayer, specialChecklistState]);
 
-  const nightGuideSteps = useMemo(() => {
-    const aliveRoles = new Set(
-      tracker.filter((player) => player.alive).map((player) => player.role),
-    );
-    const rolesInGame = new Set(tracker.map((player) => player.role));
-
-    return NIGHT_GUIDE_STEPS.filter((step) => {
-      if (step.evenNightOnly && currentNight % 2 !== 0) {
-        return false;
-      }
-
-      if (!step.requiresRole) {
-        return !step.firstNightOnly || currentNight === 1;
-      }
-
-      const shouldCallRole = SPECIAL_ROLE_SET.has(step.requiresRole)
-        ? rolesInGame.has(step.requiresRole)
-        : aliveRoles.has(step.requiresRole);
-
-      return shouldCallRole && (!step.firstNightOnly || currentNight === 1);
-    });
-  }, [currentNight, tracker]);
   const previousPhaseTimersRef = useRef<Record<
     NightPhaseName,
     PhaseTimerState
   > | null>(null);
   const apprenticePromotionLogRef = useRef<Set<string>>(new Set());
+  const appStateRef = useRef(AppState.currentState);
+  const lastPhaseSyncTimestampRef = useRef(buildInitialPhaseSyncTimestamps());
+
+  const syncRunningTimersByElapsedTime = useCallback(() => {
+    const now = Date.now();
+    setPhaseTimers((previousTimers) => {
+      let changed = false;
+
+      const nextTimers = NIGHT_PHASES.reduce(
+        (accumulator, phase) => {
+          const timer = previousTimers[phase];
+
+          if (!timer.running) {
+            accumulator[phase] = timer;
+            return accumulator;
+          }
+
+          const lastSync = lastPhaseSyncTimestampRef.current[phase] ?? now;
+          const elapsedSeconds = Math.floor((now - lastSync) / 1000);
+
+          if (elapsedSeconds <= 0) {
+            accumulator[phase] = timer;
+            return accumulator;
+          }
+
+          const nextRemaining = Math.max(0, timer.remaining - elapsedSeconds);
+          const nextRunning = nextRemaining > 0;
+
+          lastPhaseSyncTimestampRef.current[phase] = nextRunning
+            ? lastSync + elapsedSeconds * 1000
+            : now;
+
+          if (
+            nextRemaining === timer.remaining &&
+            nextRunning === timer.running
+          ) {
+            accumulator[phase] = timer;
+            return accumulator;
+          }
+
+          changed = true;
+          accumulator[phase] = {
+            remaining: nextRemaining,
+            running: nextRunning,
+          };
+
+          return accumulator;
+        },
+        {} as Record<NightPhaseName, PhaseTimerState>,
+      );
+
+      return changed ? nextTimers : previousTimers;
+    });
+  }, []);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      const wasInBackground =
+        appStateRef.current === 'background' ||
+        appStateRef.current === 'inactive';
+
+      appStateRef.current = nextAppState;
+
+      if (nextAppState === 'active' && wasInBackground) {
+        syncRunningTimersByElapsedTime();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [syncRunningTimersByElapsedTime]);
 
   useEffect(() => {
     if (!hasRunningTimer) {
@@ -901,30 +1294,11 @@ export default function TrackerScreen() {
     }
 
     const intervalId = setInterval(() => {
-      setPhaseTimers((previousTimers) =>
-        NIGHT_PHASES.reduce(
-          (accumulator, phase) => {
-            const timer = previousTimers[phase];
-            if (!timer.running) {
-              accumulator[phase] = timer;
-              return accumulator;
-            }
-
-            const nextRemaining = Math.max(0, timer.remaining - 1);
-            accumulator[phase] = {
-              remaining: nextRemaining,
-              running: nextRemaining > 0,
-            };
-
-            return accumulator;
-          },
-          {} as Record<NightPhaseName, PhaseTimerState>,
-        ),
-      );
+      syncRunningTimersByElapsedTime();
     }, 1000);
 
     return () => clearInterval(intervalId);
-  }, [hasRunningTimer]);
+  }, [hasRunningTimer, syncRunningTimersByElapsedTime]);
 
   useEffect(() => {
     const previousTimers = previousPhaseTimersRef.current;
@@ -1013,70 +1387,6 @@ export default function TrackerScreen() {
       setSelectedNightLog(nightLogByNight.nights[0]);
     }
   }, [isNightLogModalVisible, nightLogByNight, selectedNightLog]);
-
-  const getConfiguredDurationForPhase = (phase: NightPhaseName) => {
-    if (isDayTimerPhase(phase)) {
-      return normalizeDuration(dayTimerInputs[phase]);
-    }
-
-    return normalizeDuration(phaseDurationInput);
-  };
-
-  const togglePhaseTimer = (phase: NightPhaseName) => {
-    const configuredDuration = getConfiguredDurationForPhase(phase);
-
-    setPhaseTimers((previousTimers) => {
-      const current = previousTimers[phase];
-      const shouldRestart = current.remaining === 0;
-
-      return {
-        ...previousTimers,
-        [phase]: {
-          remaining: shouldRestart ? configuredDuration : current.remaining,
-          running: !current.running,
-        },
-      };
-    });
-  };
-
-  const resetPhaseTimer = (phase: NightPhaseName) => {
-    const configuredDuration = getConfiguredDurationForPhase(phase);
-
-    setPhaseTimers((previousTimers) => ({
-      ...previousTimers,
-      [phase]: {
-        remaining: configuredDuration,
-        running: false,
-      },
-    }));
-  };
-
-  const applyDurationToAllPhases = () => {
-    const configuredDuration = normalizeDuration(phaseDurationInput);
-    setPhaseTimers(buildInitialPhaseTimers(configuredDuration));
-    setDayTimerInputs({
-      Discussion: String(configuredDuration),
-      Vote: String(configuredDuration),
-      Lynch: String(configuredDuration),
-    });
-  };
-
-  const applyDayTimerDuration = (phase: DayTimerPhase) => {
-    const configuredDuration = normalizeDuration(dayTimerInputs[phase]);
-
-    setDayTimerInputs((previous) => ({
-      ...previous,
-      [phase]: String(configuredDuration),
-    }));
-
-    setPhaseTimers((previousTimers) => ({
-      ...previousTimers,
-      [phase]: {
-        remaining: configuredDuration,
-        running: false,
-      },
-    }));
-  };
 
   const toggleSpecialChecklistItem = (
     role: SpecialChecklistRole,
@@ -1345,6 +1655,7 @@ export default function TrackerScreen() {
   };
 
   const applyNightActionToPlayer = (action: PlayerNightAction) => {
+    // NOSONAR
     if (!selectedPlayer) {
       return;
     }
@@ -1541,6 +1852,7 @@ export default function TrackerScreen() {
           previousPendingCursedTransformPlayerIds.filter(
             (id) => id !== selectedPlayerId,
           );
+
         setPendingCursedTransformPlayerIds(nextPendingCursedTransformPlayerIds);
       }
 
@@ -1787,6 +2099,7 @@ export default function TrackerScreen() {
   };
 
   const undoLastAction = () => {
+    // NOSONAR
     if (!lastAppliedAction) {
       return;
     }
@@ -1816,28 +2129,18 @@ export default function TrackerScreen() {
       );
     }
 
-    if (
-      Object.prototype.hasOwnProperty.call(
-        lastAppliedAction,
-        'previousPendingDoppelCopy',
-      )
-    ) {
+    if (Object.hasOwn(lastAppliedAction, 'previousPendingDoppelCopy')) {
       setPendingDoppelCopy(lastAppliedAction.previousPendingDoppelCopy ?? null);
     }
 
-    if (
-      Object.prototype.hasOwnProperty.call(
-        lastAppliedAction,
-        'previousPendingHunterRevenge',
-      )
-    ) {
+    if (Object.hasOwn(lastAppliedAction, 'previousPendingHunterRevenge')) {
       setPendingHunterRevenge(
         lastAppliedAction.previousPendingHunterRevenge ?? null,
       );
     }
 
     if (
-      Object.prototype.hasOwnProperty.call(
+      Object.hasOwn(
         lastAppliedAction,
         'previousPendingCursedTransformPlayerIds',
       )
@@ -2062,9 +2365,9 @@ export default function TrackerScreen() {
   const handleResetTracker = () => {
     resetTracker();
     setPhaseDurationInput(String(DEFAULT_PHASE_SECONDS));
+    lastPhaseSyncTimestampRef.current = buildInitialPhaseSyncTimestamps();
     setPhaseTimers(buildDefaultPhaseTimers());
     setDayTimerInputs(buildDefaultDayTimerInputs());
-    setShowNightTimers(false);
     setSpecialChecklistState(buildInitialSpecialChecklistState());
     setCurrentNight(1);
     setNightNoteInput('');
@@ -2119,7 +2422,7 @@ export default function TrackerScreen() {
     let secondaryNextRole: RoleName | undefined;
     let inheritanceNote = '';
 
-    if (pendingDoppelCopy && pendingDoppelCopy.targetId === deadPlayerId) {
+    if (pendingDoppelCopy?.targetId === deadPlayerId) {
       const doppelPlayer = tracker.find(
         (player) => player.id === pendingDoppelCopy.doppelId,
       );
@@ -2393,7 +2696,7 @@ export default function TrackerScreen() {
     }
 
     const linkedLover = tracker.find((player) => player.id === linkedLoverId);
-    if (!linkedLover || !linkedLover.alive) {
+    if (!linkedLover?.alive) {
       return {
         tertiaryChangedAlive,
         tertiaryAliveChangePlayerId,
@@ -2732,10 +3035,11 @@ export default function TrackerScreen() {
   };
 
   const applyHunterRevengeTarget = (targetPlayerId: string) => {
+    // NOSONAR
     const hunter = tracker.find((player) => player.id === hunterSourcePlayerId);
     const target = tracker.find((player) => player.id === targetPlayerId);
 
-    if (!hunter || !target || !target.alive) {
+    if (!hunter || !target?.alive) {
       setIsHunterTargetModalVisible(false);
       setHunterSourcePlayerId(null);
       return;
@@ -3283,67 +3587,6 @@ export default function TrackerScreen() {
     setCupidSelectedLoverIds([]);
   };
 
-  const renderPhaseCard = (phase: NightPhaseName) => (
-    <View key={phase} style={[styles.phaseCard, { width: gridItemWidth }]}>
-      {isDayTimerPhase(phase) && (
-        <View style={styles.dayTimerInputRow}>
-          <TextInput
-            keyboardType="number-pad"
-            value={dayTimerInputs[phase]}
-            onChangeText={(value) =>
-              setDayTimerInputs((previous) => ({
-                ...previous,
-                [phase]: value,
-              }))
-            }
-            placeholder="45"
-            placeholderTextColor="#687089"
-            style={styles.dayTimerInput}
-          />
-          <Pressable
-            style={styles.dayTimerSetButton}
-            onPress={() => applyDayTimerDuration(phase)}
-          >
-            <Text style={styles.dayTimerSetButtonText}>{t.set}</Text>
-          </Pressable>
-        </View>
-      )}
-
-      <View style={styles.phaseHeaderRow}>
-        <Text style={styles.phaseName}>{phaseLabel(phase)}</Text>
-        <Text style={styles.phaseTime}>
-          {formatSeconds(phaseTimers[phase].remaining)}
-        </Text>
-      </View>
-
-      <View style={styles.phaseButtonRow}>
-        <Pressable
-          style={
-            phaseTimers[phase].running ? styles.pauseButton : styles.startButton
-          }
-          onPress={() => togglePhaseTimer(phase)}
-        >
-          <Text
-            style={
-              phaseTimers[phase].running
-                ? styles.pauseButtonText
-                : styles.startButtonText
-            }
-          >
-            {phaseTimers[phase].running ? t.pause : t.start}
-          </Text>
-        </Pressable>
-
-        <Pressable
-          style={styles.resetPhaseButton}
-          onPress={() => resetPhaseTimer(phase)}
-        >
-          <Text style={styles.resetPhaseButtonText}>{t.reset}</Text>
-        </Pressable>
-      </View>
-    </View>
-  );
-
   const localizedActionLabel = (action: PlayerNightAction) => {
     if (language !== 'vi') {
       return action.label;
@@ -3358,130 +3601,6 @@ export default function TrackerScreen() {
     }
 
     return VI_CHECKLIST_LABELS[label] ?? label;
-  };
-
-  const localizedNightGuideStep = (step: NightGuideStep) => {
-    if (language !== 'vi') {
-      return step;
-    }
-
-    const doppel = localizedRoleLabel('The Doppelgänger');
-    const thief = localizedRoleLabel('Thief');
-    const cupid = localizedRoleLabel('Cupid');
-    const bodyguard = localizedRoleLabel('Bodyguard');
-    const werewolf = localizedRoleLabel('Werewolf');
-    const strongman = localizedRoleLabel('Strongman');
-    const cursed = localizedRoleLabel('Cursed');
-    const whitewolf = localizedRoleLabel('Whitewolf');
-    const witch = localizedRoleLabel('Witch');
-    const enchantress = localizedRoleLabel('Enchantress');
-    const hunter = localizedRoleLabel('Hunter');
-    const seer = localizedRoleLabel('Seer');
-    const fox = localizedRoleLabel('Fox');
-    const littleGirl = localizedRoleLabel('Little Girl');
-
-    switch (step.id) {
-      case 'sleep':
-        return {
-          ...step,
-          title: 'Bắt đầu đêm',
-          call: 'Mọi người nhắm mắt. Quản trò xác nhận yên lặng.',
-          notes: 'Dừng ngắn trước mỗi lượt gọi vai để chuyển nhịp rõ ràng.',
-        };
-      case 'doppelganger':
-        return {
-          ...step,
-          title: `${doppel} chọn`,
-          call: `${doppel} thức dậy và chỉ một người để sao chép.`,
-          notes: 'Ghi lại mục tiêu được sao chép một cách kín đáo.',
-        };
-      case 'thief':
-        return {
-          ...step,
-          title: `${thief} quyết định`,
-          call: `${thief} thức dậy và có thể đổi vai nếu bàn chơi cho phép.`,
-          notes: 'Chỉ áp dụng ở đêm đầu tiên.',
-        };
-      case 'cupid':
-        return {
-          ...step,
-          title: `${cupid} liên kết`,
-          call: `${cupid} thức dậy và chọn hai tình nhân.`,
-          notes: `Báo cho hai tình nhân trong im lặng rồi ${cupid} ngủ lại.`,
-        };
-      case 'bodyguard':
-        return {
-          ...step,
-          title: `${bodyguard} bảo vệ`,
-          call: `${bodyguard} thức dậy và chọn một người để bảo vệ.`,
-          notes: `Người được bảo vệ sống sót trước đòn tấn công của ${werewolf} trong đêm.`,
-        };
-      case 'werewolves':
-        return {
-          ...step,
-          title: `${werewolf} hành động`,
-          call: `${werewolf} thức dậy, chọn một mục tiêu rồi ngủ lại.`,
-          notes: `Dùng hành động trên thẻ người chơi để ghi nhận. ${strongman} và ${cursed} sẽ tự động cập nhật ở đêm kế.`,
-        };
-      case 'whitewolf':
-        return {
-          ...step,
-          title: `${whitewolf} hành động`,
-          call: `${whitewolf} thức dậy ở các đêm chẵn để hành động đặc biệt theo luật bàn.`,
-          notes: `Thường xử lý ngay sau ${werewolf} ở các đêm 2, 4, 6... nếu bàn chơi không dùng thứ tự khác.`,
-        };
-      case 'witch':
-        return {
-          ...step,
-          title: `${witch} dùng thuốc`,
-          call: `${witch} thức dậy và có thể cứu hoặc giết theo số thuốc còn lại.`,
-          notes: `Dùng hành động modal sẽ tự cập nhật checklist của ${witch}.`,
-        };
-      case 'enchantress':
-        return {
-          ...step,
-          title: `${enchantress} phù phép`,
-          call: `${enchantress} thức dậy và chọn một người để phù phép theo luật bàn chơi.`,
-          notes: `Xử lý hiệu ứng phù phép theo biến thể mà bàn chơi đang dùng.`,
-        };
-      case 'hunter':
-        return {
-          ...step,
-          title: `${hunter} chỉ định mục tiêu`,
-          call: `${hunter} thức dậy và chọn một mục tiêu trả thù nếu bàn chơi dùng luật này.`,
-          notes: `Khi ${hunter} chết, mục tiêu đã chỉ định sẽ chết ngay lập tức.`,
-        };
-      case 'seer':
-        return {
-          ...step,
-          title: `${seer} soi`,
-          call: `${seer} thức dậy và soi một người chơi.`,
-          notes: `Tiết lộ thông tin kín cho ${seer} rồi ${seer} ngủ lại.`,
-        };
-      case 'fox':
-        return {
-          ...step,
-          title: `${fox} cảm nhận`,
-          call: `${fox} thức dậy và dùng năng lực cảm nhận nếu bàn có bật luật này.`,
-          notes: `Bỏ qua nếu bàn chơi không dùng năng lực ${fox} ban đêm.`,
-        };
-      case 'little-girl':
-        return {
-          ...step,
-          title: `Nhắc ${littleGirl}`,
-          call: `${littleGirl} chỉ được nhìn trộm nếu bàn chơi cho phép.`,
-          notes: 'Áp dụng thống nhất quy tắc công bằng của nhóm.',
-        };
-      case 'resolve':
-        return {
-          ...step,
-          title: 'Tổng kết & Trời sáng',
-          call: 'Xử lý hiệu ứng rồi thông báo trời sáng và kết quả.',
-          notes: 'Ghi log diễn biến chính trước khi vào thảo luận/bỏ phiếu.',
-        };
-      default:
-        return step;
-    }
   };
 
   const modalPlayerGridItemWidth: '100%' | '48%' = isNarrowScreen
@@ -3603,302 +3722,203 @@ export default function TrackerScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.statsHeader}>
-        <View style={styles.statsBlock}>
-          <Text style={styles.statsLabel}>{t.alive}</Text>
-          <Text style={[styles.statsValue, styles.aliveValue]}>
-            {aliveCount}
-          </Text>
-        </View>
-        <View style={styles.statsBlock}>
-          <Text style={styles.statsLabel}>{t.dead}</Text>
-          <Text style={[styles.statsValue, styles.deadValue]}>{deadCount}</Text>
-        </View>
-        <Pressable style={styles.langHeaderButton} onPress={toggleLanguage}>
-          <Text style={styles.langHeaderButtonText}>
-            {uiText[language].langButton}
-          </Text>
-        </Pressable>
-      </View>
+    <SafeAreaView className="flex-1 bg-bg">
+      <StatsHeader
+        aliveCount={aliveCount}
+        deadCount={deadCount}
+        onToggleLanguage={handleToggleLanguage}
+        language={language}
+        t={statsHeaderT}
+      />
 
       <ScrollView
-        style={styles.scrollView}
+        className="flex-1"
         contentContainerStyle={styles.scrollContent}
       >
-        <Text style={styles.screenTitle}>{t.title}</Text>
+        <Text className="text-3xl font-bold text-text mb-2 px-4 mt-4">
+          {t.title}
+        </Text>
 
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>{t.nightGuideTitle}</Text>
-          <Text style={styles.sectionSubtitle}>
-            {t.nightGuideSubtitle} {currentNight}.
-          </Text>
-
-          <View style={styles.nightGuideList}>
-            {nightGuideSteps.map((step, index) => {
-              const localizedStep = localizedNightGuideStep(step);
-
-              return (
-                <View key={step.id} style={styles.nightGuideItem}>
-                  <Text style={styles.nightGuideItemTitle}>
-                    {index + 1}. {localizedStep.title}
-                  </Text>
-                </View>
-              );
-            })}
-          </View>
-        </View>
-
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>{t.phaseTimersTitle}</Text>
-          <Text style={styles.sectionSubtitle}>{t.phaseTimersSubtitle}</Text>
-          <View style={styles.gridContainer}>
-            {DAY_TIMER_PHASES.map(renderPhaseCard)}
-          </View>
-        </View>
-
-        {activeSpecialChecklistRoles.length > 0 && (
-          <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>{t.specialChecksTitle}</Text>
-            <Text style={styles.sectionSubtitle}>
-              {t.specialChecksSubtitle}
-            </Text>
-
-            <View style={styles.gridContainer}>
-              {activeSpecialChecklistRoles.map((role) => (
-                <View
-                  key={role}
-                  style={[styles.specialRoleCard, { width: gridItemWidth }]}
-                >
-                  <Text style={styles.specialRoleTitle}>
-                    {localizedRoleLabel(role)}
-                  </Text>
-
-                  {SPECIAL_ROLE_CHECKLISTS[role].map((checkLabel, index) => {
-                    const checked = specialChecklistState[role][index];
-
-                    return (
-                      <Pressable
-                        key={`${role}-${checkLabel}`}
-                        style={styles.checkRow}
-                        onPress={() => toggleSpecialChecklistItem(role, index)}
-                      >
-                        <View
-                          style={[
-                            styles.checkbox,
-                            checked && styles.checkboxChecked,
-                          ]}
-                        >
-                          {checked && (
-                            <Text style={styles.checkboxMark}>✓</Text>
-                          )}
-                        </View>
-                        <Text
-                          style={[
-                            styles.checkLabel,
-                            checked && styles.checkLabelChecked,
-                          ]}
-                        >
-                          {localizedChecklistLabel(checkLabel)}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-
-                  {role === 'Cupid' && cupidLinkedPlayerIds.length > 0 && (
-                    <View style={styles.linkedLoversWrap}>
-                      <Text style={styles.linkedLoversLabel}>
-                        {t.linkedLovers}
-                      </Text>
-                      {cupidLinkedPlayerIds.map((id) => {
-                        const playerName =
-                          tracker.find((player) => player.id === id)?.name ??
-                          id;
-
-                        return (
-                          <Text
-                            key={`lover-${id}`}
-                            style={styles.linkedLoversName}
-                          >
-                            - {playerName}
-                          </Text>
-                        );
-                      })}
-                    </View>
-                  )}
-                </View>
-              ))}
-            </View>
-          </View>
-        )}
-
-        <View style={styles.sectionCard}>
-          <View style={styles.nightHeaderRow}>
-            <View>
-              <Text style={styles.sectionTitle}>{t.developmentsTitle}</Text>
-              <Text style={styles.sectionSubtitle}>
-                {t.currentNight}: {currentNight}
-              </Text>
-            </View>
-          </View>
-
-          <TextInput
-            value={nightNoteInput}
-            onChangeText={setNightNoteInput}
-            placeholder={t.notePlaceholder}
-            placeholderTextColor="#687089"
-            multiline
-            style={styles.nightNoteInput}
+        <View className="px-4">
+          <NightGuide
+            steps={localizedNightGuideSteps}
+            currentNight={currentNight}
+            t={nightGuideT}
           />
 
-          <View style={styles.nightActionRow}>
-            <Pressable style={styles.addNightNoteButton} onPress={addNightNote}>
-              <Text style={styles.addNightNoteButtonText}>{t.addNote}</Text>
-            </Pressable>
-            <Pressable
-              style={styles.clearNightLogButton}
-              onPress={clearNightLog}
-            >
-              <Text style={styles.clearNightLogButtonText}>{t.clearLog}</Text>
-            </Pressable>
-          </View>
-
-          <View style={styles.undoRow}>
-            <Pressable
-              style={[
-                styles.undoButton,
-                !lastAppliedAction && styles.undoButtonDisabled,
-              ]}
-              disabled={!lastAppliedAction}
-              onPress={undoLastAction}
-            >
-              <Text
-                style={[
-                  styles.undoButtonText,
-                  !lastAppliedAction && styles.undoButtonTextDisabled,
-                ]}
-              >
-                {t.undo}
-              </Text>
-            </Pressable>
-
-            <Pressable style={styles.viewLogButton} onPress={openNightLogModal}>
-              <Text style={styles.viewLogButtonText}>{t.viewLog}</Text>
-            </Pressable>
-          </View>
-        </View>
-
-        <View style={styles.gridContainer}>
-          {tracker.map((player) => (
-            <Pressable
-              key={player.id}
-              style={[
-                styles.playerCard,
-                { width: gridItemWidth },
-                (player.role === 'Werewolf' || player.role === 'Whitewolf') &&
-                  styles.playerCardWolf,
-                !player.alive && styles.playerCardDead,
-              ]}
-              onPress={() => setSelectedPlayerId(player.id)}
-            >
-              <View>
-                <Text
-                  style={[
-                    styles.playerName,
-                    !player.alive && styles.playerNameDead,
-                  ]}
-                >
-                  {player.name}
-                </Text>
-                <Text
-                  style={[
-                    styles.playerRole,
-                    !player.alive && styles.playerRoleDead,
-                  ]}
-                >
-                  {localizedRoleLabel(player.role)}
-                </Text>
-                {SPECIAL_ROLE_ICONS[player.role] && (
-                  <View style={styles.roleIconWrap}>
-                    <Text style={styles.roleIconText}>
-                      {SPECIAL_ROLE_ICONS[player.role]}
-                    </Text>
-                  </View>
-                )}
-                {seerCheckedPlayerIds.includes(player.id) && (
-                  <View style={styles.checkedIconWrap}>
-                    <Text style={styles.checkedIconText}>
-                      {STATUS_BADGE_ICONS.checked}
-                    </Text>
-                  </View>
-                )}
-                {enchantressMarkedPlayerIds.includes(player.id) && (
-                  <View style={styles.enchantedIconWrap}>
-                    <Text style={styles.enchantedIconText}>
-                      {STATUS_BADGE_ICONS.enchanted}
-                    </Text>
-                  </View>
-                )}
-                {doppelCopiedPlayerIds.includes(player.id) && (
-                  <View style={styles.copiedIconWrap}>
-                    <Text style={styles.copiedIconText}>
-                      {STATUS_BADGE_ICONS.copied}
-                    </Text>
-                  </View>
-                )}
-                {cupidLinkedPlayerIds.includes(player.id) && (
-                  <View style={styles.loverIconWrap}>
-                    <Text style={styles.loverIconText}>
-                      {STATUS_BADGE_ICONS.lover}
-                    </Text>
-                  </View>
-                )}
-                {bodyguardProtectedPlayerIds.includes(player.id) && (
-                  <View style={styles.protectedIconWrap}>
-                    <Text style={styles.protectedIconText}>
-                      {STATUS_BADGE_ICONS.protected}
-                    </Text>
-                  </View>
-                )}
-                {player.role === 'Strongman' && (
-                  <View style={styles.strongmanIconWrap}>
-                    <Text style={styles.strongmanIconText}>
-                      {strongmanSurvivedPlayerIds.includes(player.id)
-                        ? STATUS_BADGE_ICONS.strongmanPending
-                        : STATUS_BADGE_ICONS.strongman}
-                    </Text>
-                  </View>
-                )}
-                {pendingCursedTransformPlayerIds.includes(player.id) && (
-                  <View style={styles.cursedPendingIconWrap}>
-                    <Text style={styles.cursedPendingIconText}>
-                      {STATUS_BADGE_ICONS.cursedPending}
-                    </Text>
-                  </View>
-                )}
-                {player.role === 'Elder' && (
-                  <View style={styles.elderIconWrap}>
-                    <Text style={styles.elderIconText}>
-                      {STATUS_BADGE_ICONS.elder}
-                    </Text>
-                  </View>
-                )}
-                {pendingHunterRevenge?.targetId === player.id && (
-                  <View style={styles.hunterTargetIconWrap}>
-                    <Text style={styles.hunterTargetIconText}>
-                      {STATUS_BADGE_ICONS.hunterTarget}
-                    </Text>
-                  </View>
-                )}
-              </View>
-              <View
-                style={[
-                  styles.playerDot,
-                  player.alive ? styles.playerDotAlive : styles.playerDotDead,
-                ]}
+          <View className="mt-6">
+            <Text className="text-base font-bold text-text mb-2">
+              {t.phaseTimersTitle}
+            </Text>
+            <Text className="text-xs text-text-muted mb-4">
+              {t.phaseTimersSubtitle}
+            </Text>
+            {DAY_TIMER_PHASES.map((phase) => (
+              <TimerDisplay
+                key={phase}
+                label={phaseLabel(phase)}
+                remaining={phaseTimers[phase].remaining}
+                isRunning={phaseTimers[phase].running}
+                onToggle={() => handleToggleTimer(phase)}
+                onReset={() => handleResetTimer(phase)}
+                onDurationChange={(val) => handleDurationChange(phase, val)}
+                onApplyDuration={() => applyDayTimerDuration(phase)}
+                durationInput={dayTimerInputs[phase]}
+                formatSeconds={formatSeconds}
+                t={timerT}
               />
-            </Pressable>
-          ))}
+            ))}
+          </View>
+
+          {activeSpecialChecklistRoles.length > 0 && (
+            <Card className="mt-6 p-4">
+              <Text className="text-base font-bold text-text mb-1">
+                {t.specialChecksTitle}
+              </Text>
+              <Text className="text-xs text-text-muted mb-4">
+                {t.specialChecksSubtitle}
+              </Text>
+
+              <View className="flex-row flex-wrap justify-between">
+                {activeSpecialChecklistRoles.map((role) => (
+                  <View
+                    key={role}
+                    className="mb-4 bg-surface-muted border border-border rounded-xl p-3"
+                    style={{ width: isNarrowScreen ? '100%' : '48%' }}
+                  >
+                    <Text className="text-sm font-bold text-text mb-2">
+                      {localizedRoleLabel(role)}
+                    </Text>
+
+                    {SPECIAL_ROLE_CHECKLISTS[role].map((checkLabel, index) => {
+                      const checked = specialChecklistState[role][index];
+
+                      return (
+                        <Pressable
+                          key={`${role}-${checkLabel}`}
+                          className="flex-row items-center mt-2"
+                          onPress={() =>
+                            toggleSpecialChecklistItem(role, index)
+                          }
+                        >
+                          <View
+                            className={`w-5 h-5 border border-border rounded items-center justify-center ${
+                              checked ? 'bg-accent border-accent' : 'bg-surface'
+                            }`}
+                          >
+                            {checked && (
+                              <Text className="text-white text-[10px] font-bold">
+                                ✓
+                              </Text>
+                            )}
+                          </View>
+                          <Text
+                            className={`ml-2 text-sm flex-1 ${
+                              checked
+                                ? 'line-through text-text-muted'
+                                : 'text-text'
+                            }`}
+                          >
+                            {localizedChecklistLabel(checkLabel)}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+
+                    {role === 'Cupid' && cupidLinkedPlayerIds.length > 0 && (
+                      <View className="mt-3 pt-2 border-t border-border">
+                        <Text className="text-xs font-bold text-text">
+                          {t.linkedLovers}
+                        </Text>
+                        {cupidLinkedPlayerIds.map((id) => {
+                          const playerName =
+                            tracker.find((player) => player.id === id)?.name ??
+                            id;
+
+                          return (
+                            <Text
+                              key={`lover-${id}`}
+                              className="text-xs text-text-muted mt-1"
+                            >
+                              - {playerName}
+                            </Text>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </View>
+                ))}
+              </View>
+            </Card>
+          )}
+
+          <Card className="mt-6 p-4">
+            <View className="flex-row items-center justify-between mb-4">
+              <View>
+                <Text className="text-base font-bold text-text">
+                  {t.developmentsTitle}
+                </Text>
+                <Text className="text-xs text-text-muted">
+                  {t.currentNight}: {currentNight}
+                </Text>
+              </View>
+            </View>
+
+            <TextInput
+              value={nightNoteInput}
+              onChangeText={setNightNoteInput}
+              placeholder={t.notePlaceholder}
+              placeholderTextColor="#687089"
+              multiline
+              className="min-h-[80px] border border-border rounded-xl bg-surface p-3 text-text text-sm"
+              style={{ textAlignVertical: 'top' }}
+            />
+
+            <View className="flex-row gap-2 mt-4">
+              <Button
+                label={t.addNote}
+                variant="primary"
+                className="flex-1"
+                onPress={addNightNote}
+              />
+              <Button
+                label={t.clearLog}
+                variant="outline"
+                className="flex-1"
+                onPress={clearNightLog}
+              />
+            </View>
+
+            <View className="flex-row items-center justify-between mt-4">
+              <Pressable
+                className={`px-4 py-2 rounded-lg border border-border bg-surface ${hasLastAppliedAction ? '' : 'opacity-50'}`}
+                disabled={!hasLastAppliedAction}
+                onPress={undoLastAction}
+              >
+                <Text
+                  className={`text-xs font-bold text-text ${hasLastAppliedAction ? '' : 'text-text-muted'}`}
+                >
+                  {t.undo}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                className="px-4 py-2 rounded-lg border border-border bg-surface"
+                onPress={openNightLogModal}
+              >
+                <Text className="text-xs font-bold text-text">{t.viewLog}</Text>
+              </Pressable>
+            </View>
+          </Card>
+
+          <PlayerGrid
+            players={tracker}
+            onPlayerPress={handlePlayerPress}
+            getRoleLabel={localizedRoleLabelCallback}
+            getRoleIcon={getRoleIconForPlayer}
+            getStatusIcons={getPlayerStatusIcons}
+            isNarrowScreen={isNarrowScreen}
+          />
         </View>
       </ScrollView>
 
@@ -3919,7 +3939,7 @@ export default function TrackerScreen() {
             </Text>
 
             <View style={styles.modalActionList}>
-              {availableNightActions.map((action) => (
+              {availableActions.map((action) => (
                 <Pressable
                   key={action.key}
                   style={[
@@ -4519,26 +4539,26 @@ export default function TrackerScreen() {
         </View>
       </Modal>
 
-      <View style={styles.footer}>
-        <View style={styles.footerActionRow}>
-          <Pressable
-            style={styles.editRolesFooterButton}
+      <View className="border-t border-border bg-surface px-4 pt-3 pb-6">
+        <View className="flex-row gap-2">
+          <Button
+            label={t.editRole}
+            variant="outline"
+            className="flex-1"
             onPress={openRoleEditModal}
-          >
-            <Text style={styles.editRolesFooterButtonText}>{t.editRole}</Text>
-          </Pressable>
-          <Pressable
-            style={styles.resetTrackerButton}
+          />
+          <Button
+            label={t.resetTracker}
+            variant="outline"
+            className="flex-1"
             onPress={handleResetTracker}
-          >
-            <Text style={styles.resetTrackerButtonText}>{t.resetTracker}</Text>
-          </Pressable>
-          <Pressable
-            style={styles.nextNightFooterButton}
+          />
+          <Button
+            label={t.nextNight}
+            variant="primary"
+            className="flex-1"
             onPress={moveToNextNight}
-          >
-            <Text style={styles.nextNightFooterButtonText}>{t.nextNight}</Text>
-          </Pressable>
+          />
         </View>
       </View>
     </SafeAreaView>
@@ -4546,912 +4566,321 @@ export default function TrackerScreen() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: COLORS.bg,
-  },
-  statsHeader: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-    backgroundColor: COLORS.surface,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  statsBlock: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  langHeaderButton: {
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 8,
-    backgroundColor: COLORS.surfaceMuted,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignSelf: 'center',
-  },
-  langHeaderButtonText: {
-    color: COLORS.text,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  statsLabel: {
-    fontSize: 12,
-    color: COLORS.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  statsValue: {
-    marginTop: 4,
-    fontSize: 26,
-    fontWeight: '700',
-  },
-  aliveValue: {
-    color: '#6E9D6A',
-  },
-  deadValue: {
-    color: COLORS.accent,
-  },
-  scrollView: {
-    flex: 1,
-  },
   scrollContent: {
-    padding: 16,
     paddingBottom: 24,
   },
-  screenTitle: {
-    fontSize: 32,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  screenSubtitle: {
-    marginTop: 8,
-    fontSize: 14,
-    color: COLORS.textMuted,
-  },
-  strongmanHintText: {
-    marginTop: 4,
-    fontSize: 12,
-    color: COLORS.textMuted,
-  },
-  sectionCard: {
-    marginTop: 20,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: COLORS.surface,
-    borderRadius: 16,
-    padding: 16,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  sectionSubtitle: {
-    marginTop: 4,
-    fontSize: 12,
-    color: COLORS.textMuted,
-  },
-  nightGuideList: {
-    marginTop: 12,
-  },
-  nightGuideItem: {
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 10,
-    backgroundColor: COLORS.surfaceMuted,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-  },
-  nightGuideItemTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  nightGuideCall: {
-    marginTop: 4,
-    fontSize: 13,
-    color: COLORS.text,
-  },
-  nightGuideNotes: {
-    marginTop: 4,
-    fontSize: 12,
-    color: COLORS.textMuted,
-  },
-  phaseTopRow: {
-    marginTop: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  phaseInput: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 8,
-    backgroundColor: COLORS.surfaceMuted,
-    color: COLORS.text,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 16,
-  },
-  applyButton: {
-    borderWidth: 1,
-    borderColor: COLORS.accent,
-    backgroundColor: COLORS.accent,
-    borderRadius: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  applyButtonText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  gridContainer: {
-    marginTop: 12,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-  },
   phaseCard: {
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: COLORS.border,
+    backgroundColor: '#1E2337',
     borderRadius: 12,
-    backgroundColor: COLORS.surfaceMuted,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-  },
-  phaseHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  phaseName: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: COLORS.text,
-    flexShrink: 1,
-    paddingRight: 6,
-  },
-  phaseTime: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: COLORS.accent,
-  },
-  phaseButtonRow: {
-    marginTop: 12,
-    flexDirection: 'row',
-    gap: 8,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#3A425B',
   },
   dayTimerInputRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    marginBottom: 12,
     gap: 8,
-    marginBottom: 10,
   },
   dayTimerInput: {
     flex: 1,
-    borderWidth: 1,
-    borderColor: COLORS.border,
+    backgroundColor: '#0F111A',
     borderRadius: 8,
-    backgroundColor: COLORS.surface,
-    color: COLORS.text,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    color: '#F4F6FB',
     fontSize: 14,
+    borderWidth: 1,
+    borderColor: '#3A425B',
   },
   dayTimerSetButton: {
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: COLORS.surface,
+    backgroundColor: '#3A425B',
     borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    alignItems: 'center',
+    paddingHorizontal: 16,
     justifyContent: 'center',
+    alignItems: 'center',
   },
   dayTimerSetButtonText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  phaseGroupTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  phaseGroupHeaderRow: {
-    marginTop: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  nightToggleButton: {
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 8,
-    backgroundColor: COLORS.surface,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  nightToggleButtonText: {
-    color: COLORS.text,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  specialRoleCard: {
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 12,
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-  },
-  specialRoleTitle: {
+    color: '#F4F6FB',
     fontSize: 14,
-    fontWeight: '700',
-    color: '#1E2433',
+    fontWeight: 'bold',
   },
-  checkRow: {
-    marginTop: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  checkbox: {
-    width: 20,
-    height: 20,
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 6,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  checkboxChecked: {
-    borderColor: '#C43D31',
-    backgroundColor: '#C43D31',
-  },
-  checkboxMark: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  checkLabel: {
-    marginLeft: 10,
-    flex: 1,
-    fontSize: 13,
-    color: '#1E2433',
-  },
-  checkLabelChecked: {
-    textDecorationLine: 'line-through',
-    color: '#687089',
-  },
-  linkedLoversWrap: {
-    marginTop: 10,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#E6EAF3',
-  },
-  linkedLoversLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  linkedLoversName: {
-    marginTop: 3,
-    fontSize: 12,
-    color: '#687089',
-  },
-  nightHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  nightNoteInput: {
-    marginTop: 12,
-    minHeight: 80,
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 8,
-    backgroundColor: '#FFFFFF',
-    color: '#1E2433',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
-    textAlignVertical: 'top',
-  },
-  nightActionRow: {
-    marginTop: 10,
-    flexDirection: 'row',
-    gap: 8,
-  },
-  addNightNoteButton: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: '#C43D31',
-    backgroundColor: '#C43D31',
-    borderRadius: 8,
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  addNightNoteButtonText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
-  clearNightLogButton: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    backgroundColor: '#F7F8FC',
-    borderRadius: 8,
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  clearNightLogButtonText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  undoRow: {
-    marginTop: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  undoButton: {
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 8,
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  viewLogButton: {
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 8,
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  viewLogButtonText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  undoButtonDisabled: {
-    backgroundColor: '#F2F4FB',
-  },
-  undoButtonText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  undoButtonTextDisabled: {
-    color: '#9AA0B5',
-  },
-  nightLogList: {
-    marginTop: 12,
-  },
-  emptyNightLogText: {
-    fontSize: 13,
-    color: '#687089',
-  },
-  nightLogItem: {
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 10,
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-  },
-  nightLogMetaRow: {
+  phaseHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: 12,
   },
-  nightLogNight: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1E2433',
+  phaseName: {
+    color: '#F4F6FB',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
-  nightLogTime: {
-    fontSize: 12,
-    color: '#687089',
+  phaseTime: {
+    color: '#C4473A',
+    fontSize: 18,
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
   },
-  nightLogText: {
-    marginTop: 6,
-    fontSize: 13,
-    color: '#1E2433',
-    lineHeight: 18,
+  phaseButtonRow: {
+    flexDirection: 'row',
+    gap: 8,
   },
   startButton: {
     flex: 1,
-    alignItems: 'center',
+    backgroundColor: '#C4473A',
     borderRadius: 8,
-    borderWidth: 1,
-    paddingVertical: 8,
-    borderColor: '#C43D31',
-    backgroundColor: '#C43D31',
+    paddingVertical: 10,
+    alignItems: 'center',
   },
   startButtonText: {
     color: '#FFFFFF',
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: 'bold',
   },
   pauseButton: {
     flex: 1,
-    alignItems: 'center',
+    backgroundColor: '#687089',
     borderRadius: 8,
-    borderWidth: 1,
-    paddingVertical: 8,
-    borderColor: '#D9DDE8',
-    backgroundColor: '#C9CFDE',
+    paddingVertical: 10,
+    alignItems: 'center',
   },
   pauseButtonText: {
-    color: '#1E2433',
+    color: '#FFFFFF',
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: 'bold',
   },
   resetPhaseButton: {
-    flex: 1,
-    alignItems: 'center',
+    backgroundColor: '#3A425B',
     borderRadius: 8,
-    borderWidth: 1,
-    paddingVertical: 8,
-    borderColor: '#D9DDE8',
-    backgroundColor: '#F7F8FC',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   resetPhaseButtonText: {
-    color: '#1E2433',
+    color: '#F4F6FB',
     fontSize: 14,
-    fontWeight: '700',
-  },
-  playerCard: {
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 12,
-    backgroundColor: '#F7F8FC',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    minHeight: 192,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  playerCardWolf: {
-    borderColor: '#C43D31',
-  },
-  playerCardDead: {
-    opacity: 0.6,
-  },
-  playerName: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  playerNameDead: {
-    color: '#687089',
-    textDecorationLine: 'line-through',
-  },
-  playerRole: {
-    marginTop: 4,
-    fontSize: 12,
-    color: '#687089',
-  },
-  roleIconWrap: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 999,
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 16,
-    paddingVertical: 4,
-  },
-  roleIconText: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  playerRoleDead: {
-    textDecorationLine: 'line-through',
-  },
-  checkedIconWrap: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 999,
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  checkedIconText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  enchantedIconWrap: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#8F7A42',
-    borderRadius: 999,
-    backgroundColor: '#FFF6DC',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  enchantedIconText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#725200',
-  },
-  copiedIconWrap: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 999,
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  copiedIconText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  loverIconWrap: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#E8B7B7',
-    borderRadius: 999,
-    backgroundColor: '#FFF3F3',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  loverIconText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#A23030',
-  },
-  protectedIconWrap: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 999,
-    backgroundColor: '#EEF4FF',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  protectedIconText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  elderIconWrap: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#E3D9B0',
-    borderRadius: 999,
-    backgroundColor: '#FFFBEF',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  elderIconText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#6A5600',
-  },
-  strongmanIconWrap: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#C8DAB8',
-    borderRadius: 999,
-    backgroundColor: '#F3FAED',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  strongmanIconText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#2E5D2E',
-  },
-  cursedPendingIconWrap: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#D2B26B',
-    borderRadius: 999,
-    backgroundColor: '#FFF6E5',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  cursedPendingIconText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#725200',
-  },
-  hunterTargetIconWrap: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#EBCB8A',
-    borderRadius: 999,
-    backgroundColor: '#FFF8E8',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  hunterTargetIconText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#7A4E00',
-  },
-  playerDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 999,
-  },
-  playerDotAlive: {
-    backgroundColor: '#6E9D6A',
-  },
-  playerDotDead: {
-    backgroundColor: '#C43D31',
+    fontWeight: 'bold',
   },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
     justifyContent: 'center',
-    paddingHorizontal: 20,
+    alignItems: 'center',
+    padding: 20,
   },
   modalCard: {
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
+    backgroundColor: '#1E2337',
     borderRadius: 16,
-    backgroundColor: '#FFFFFF',
-    padding: 16,
-  },
-  roleEditModalCard: {
+    padding: 24,
+    width: '100%',
     maxHeight: '80%',
-  },
-  nightLogModalCard: {
-    maxHeight: '85%',
-  },
-  nightLogTabsScroll: {
-    marginTop: 12,
-    maxHeight: 42,
-  },
-  nightLogTabsContainer: {
-    gap: 8,
-  },
-  nightLogTab: {
     borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 999,
-    backgroundColor: '#F7F8FC',
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-  },
-  nightLogTabSelected: {
-    borderColor: '#C43D31',
-    backgroundColor: '#FDEDED',
-  },
-  nightLogTabText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  nightLogTabTextSelected: {
-    color: '#A23030',
-  },
-  nightLogModalList: {
-    marginTop: 12,
-    maxHeight: 360,
-  },
-  roleEditList: {
-    marginTop: 12,
-    maxHeight: 320,
+    borderColor: '#3A425B',
   },
   modalTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1E2433',
+    color: '#F4F6FB',
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 8,
+    textAlign: 'center',
   },
   modalSubtitle: {
-    marginTop: 4,
-    fontSize: 13,
     color: '#687089',
-  },
-  modalActionList: {
-    gap: 8,
+    fontSize: 14,
+    marginBottom: 20,
+    textAlign: 'center',
   },
   modalPlayerGridScroll: {
-    marginTop: 12,
-    maxHeight: 360,
+    marginBottom: 20,
   },
   modalPlayerGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',
-    gap: 8,
-  },
-  modalPlayerCard: {
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    backgroundColor: '#F7F8FC',
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-  },
-  modalPlayerCardSelected: {
-    borderColor: '#C43D31',
-    backgroundColor: '#FDEDED',
-  },
-  modalPlayerCardSource: {
-    borderColor: '#C43D31',
-  },
-  modalPlayerCardDisabled: {
-    borderColor: '#D9DDE8',
-    backgroundColor: '#F2F4FB',
+    gap: 12,
   },
   modalPlayerCardTopRow: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 8,
+    alignItems: 'center',
+    marginBottom: 4,
   },
   modalPlayerCardName: {
+    color: '#F4F6FB',
+    fontSize: 16,
+    fontWeight: 'bold',
     flex: 1,
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  modalPlayerCardRole: {
-    marginTop: 3,
-    fontSize: 12,
-    color: '#687089',
-  },
-  modalPlayerCardHelper: {
-    marginTop: 4,
-    fontSize: 11,
-    color: '#A23030',
-    fontWeight: '600',
   },
   modalPlayerDot: {
     width: 8,
     height: 8,
-    borderRadius: 999,
+    borderRadius: 4,
+    marginLeft: 8,
   },
-  modalActionButton: {
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    backgroundColor: '#F7F8FC',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 11,
+  playerDotAlive: {
+    backgroundColor: '#4CAF50',
   },
-  modalActionButtonSelected: {
-    borderColor: '#C43D31',
-    backgroundColor: '#FDEDED',
+  playerDotDead: {
+    backgroundColor: '#F44336',
   },
-  modalActionButtonDisabled: {
-    borderColor: '#D9DDE8',
-    backgroundColor: '#F2F4FB',
+  modalPlayerCardRole: {
+    color: '#687089',
+    fontSize: 13,
   },
-  modalActionButtonText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#1E2433',
+  modalPlayerCardHelper: {
+    color: '#C4473A',
+    fontSize: 11,
+    marginTop: 4,
   },
   modalActionButtonTextDisabled: {
-    color: '#9AA0B5',
-  },
-  modalEmptyText: {
-    fontSize: 13,
-    color: '#687089',
+    color: '#3A425B',
   },
   modalConfirmButton: {
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#C43D31',
-    borderRadius: 10,
-    backgroundColor: '#C43D31',
+    backgroundColor: '#C4473A',
+    borderRadius: 12,
+    paddingVertical: 14,
     alignItems: 'center',
-    paddingVertical: 11,
+    marginBottom: 12,
   },
   modalConfirmButtonDisabled: {
-    borderColor: '#D9DDE8',
-    backgroundColor: '#C9CFDE',
+    backgroundColor: '#3A425B',
+    opacity: 0.5,
   },
   modalConfirmButtonText: {
-    fontSize: 14,
-    fontWeight: '700',
     color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
   modalCancelButton: {
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    borderRadius: 10,
+    backgroundColor: 'transparent',
+    paddingVertical: 12,
     alignItems: 'center',
-    paddingVertical: 11,
-    backgroundColor: '#FFFFFF',
   },
   modalCancelButtonText: {
+    color: '#687089',
     fontSize: 14,
-    fontWeight: '700',
-    color: '#1E2433',
   },
-  footer: {
-    borderTopWidth: 1,
-    borderTopColor: '#D9DDE8',
-    backgroundColor: '#FFFFFF',
+  nightLogModalCard: {
+    maxHeight: '90%',
+  },
+  nightLogModalList: {
+    flex: 1,
+    marginBottom: 20,
+  },
+  emptyNightLogText: {
+    color: '#687089',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 40,
+  },
+  nightLogTabsScroll: {
+    marginBottom: 16,
+  },
+  nightLogTabsContainer: {
+    gap: 12,
+  },
+  nightLogTab: {
     paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 24,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#0F111A',
+    borderWidth: 1,
+    borderColor: '#3A425B',
   },
-  footerActionRow: {
+  nightLogTabSelected: {
+    backgroundColor: '#C4473A',
+    borderColor: '#C4473A',
+  },
+  nightLogTabText: {
+    color: '#687089',
+    fontSize: 13,
+    fontWeight: 'bold',
+  },
+  nightLogTabTextSelected: {
+    color: '#FFFFFF',
+  },
+  nightLogItem: {
+    backgroundColor: '#0F111A',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#3A425B',
+  },
+  nightLogMetaRow: {
     flexDirection: 'row',
-    gap: 8,
+    justifyContent: 'space-between',
+    marginBottom: 8,
   },
-  editRolesFooterButton: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: '#D9DDE8',
-    backgroundColor: '#FFFFFF',
+  nightLogNight: {
+    color: '#C4473A',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  nightLogTime: {
+    color: '#3A425B',
+    fontSize: 11,
+  },
+  nightLogText: {
+    color: '#F4F6FB',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  modalPlayerCard: {
+    backgroundColor: '#0F111A',
     borderRadius: 12,
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-  editRolesFooterButtonText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1E2433',
-  },
-  nextNightFooterButton: {
-    flex: 1,
+    padding: 12,
     borderWidth: 1,
-    borderColor: '#6E9D6A',
-    backgroundColor: '#6E9D6A',
+    borderColor: '#3A425B',
+  },
+  modalPlayerCardSelected: {
+    borderColor: '#C4473A',
+    backgroundColor: '#1E2337',
+  },
+  modalPlayerCardSource: {
+    borderColor: '#4CAF50',
+    backgroundColor: '#0F2A1A',
+  },
+  modalPlayerCardDisabled: {
+    opacity: 0.5,
+    backgroundColor: '#0F111A',
+  },
+  modalActionList: {
+    gap: 12,
+  },
+  modalActionButton: {
+    backgroundColor: '#3A425B',
     borderRadius: 12,
-    paddingVertical: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
     alignItems: 'center',
-  },
-  nextNightFooterButtonText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
-  resetTrackerButton: {
-    flex: 1,
     borderWidth: 1,
-    borderColor: '#C43D31',
-    backgroundColor: '#C43D31',
-    borderRadius: 12,
-    paddingVertical: 16,
-    alignItems: 'center',
+    borderColor: '#4A526B',
   },
-  resetTrackerButtonText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#FFFFFF',
+  modalActionButtonDisabled: {
+    opacity: 0.5,
+    backgroundColor: '#2A3045',
+  },
+  modalActionButtonText: {
+    color: '#F4F6FB',
+    fontSize: 15,
+    fontWeight: 'bold',
+  },
+  roleEditModalCard: {
+    maxHeight: '90%',
+  },
+  roleEditList: {
+    maxHeight: 400,
+    marginBottom: 20,
+  },
+  modalEmptyText: {
+    color: '#687089',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 20,
+    marginBottom: 20,
+    fontStyle: 'italic',
   },
 });

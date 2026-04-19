@@ -8,13 +8,19 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        bg: '#FFFFFF',
-        card: '#F7F8FC',
-        border: '#D9DDE8',
-        text: '#1E2433',
-        muted: '#687089',
+        bg: '#F4F6FB',
+        surface: '#FFFFFF',
+        'surface-muted': '#F8FAFF',
+        border: '#D6DCEB',
+        text: '#1D2433',
+        'text-muted': '#667089',
+        accent: '#B63A30',
+        disabled: '#C8D0E0',
         wolf: '#C43D31',
         village: '#6E9D6A',
+      },
+      borderRadius: {
+        '2xl': '16px',
       },
     },
   },
