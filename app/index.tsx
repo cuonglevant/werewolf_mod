@@ -15,19 +15,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ROLE_SHORT_DESCRIPTIONS, SPECIAL_ROLES } from '@/src/game/roles';
 import { getRoleLabel, SPECIAL_ROLE_DESCRIPTIONS_VI } from '@/src/i18n/roles';
+import { APP_COLORS as COLORS } from '@/src/shared/colors';
 import { uiText } from '@/src/i18n/ui';
 import { useGame } from '@/src/state/game-context';
-
-const COLORS = {
-  bg: '#F4F6FB',
-  surface: '#FFFFFF',
-  surfaceMuted: '#F8FAFF',
-  border: '#D6DCEB',
-  text: '#1D2433',
-  textMuted: '#667089',
-  accent: '#B63A30',
-  disabled: '#C8D0E0',
-};
 
 export default function SetupScreen() {
   const { width } = useWindowDimensions();

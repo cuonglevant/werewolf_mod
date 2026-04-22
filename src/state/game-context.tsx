@@ -18,17 +18,11 @@ import {
   SPECIAL_ROLES,
   SpecialRole,
 } from '@/src/game/roles';
-
-type TrackedPlayer = {
-  id: string;
-  role: RoleName;
-  alive: boolean;
-  name: string;
-};
-
-type TrackerRoleSnapshot = Record<string, RoleName>;
-
-export type AppLanguage = 'en' | 'vi';
+import type { AppLanguage } from '@/src/shared/app-language';
+import type {
+  TrackerRoleSnapshot,
+  TrackedPlayer,
+} from '@/src/state/game-types';
 
 type GameContextValue = {
   playerCount: number;

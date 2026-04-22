@@ -1,4 +1,4 @@
-import type { AppLanguage } from '@/src/state/game-context';
+import type { AppLanguage } from '@/src/shared/app-language';
 
 export const uiText: Record<
   AppLanguage,

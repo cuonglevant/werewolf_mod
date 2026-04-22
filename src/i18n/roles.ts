@@ -1,5 +1,5 @@
 import type { RoleName, SpecialRole } from '@/src/game/roles';
-import type { AppLanguage } from '@/src/state/game-context';
+import type { AppLanguage } from '@/src/shared/app-language';
 
 const ROLE_LABELS: Record<AppLanguage, Record<RoleName, string>> = {
   en: {

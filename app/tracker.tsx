@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AppState,
+  type AppStateStatus,
   Modal,
   Pressable,
   ScrollView,
@@ -18,6 +20,7 @@ import {
   type RoleName,
 } from '@/src/game/roles';
 import { getRoleLabel } from '@/src/i18n/roles';
+import { APP_COLORS as COLORS } from '@/src/shared/colors';
 import { uiText } from '@/src/i18n/ui';
 import { useGame } from '@/src/state/game-context';
 
@@ -38,18 +41,6 @@ const DEFAULT_PHASE_SECONDS = 45;
 const DEFAULT_DISCUSSION_SECONDS = 90;
 const DEFAULT_VOTE_SECONDS = 15;
 const DEFAULT_LYNCH_SECONDS = 30;
-
-const COLORS = {
-  bg: '#F4F6FB',
-  surface: '#FFFFFF',
-  surfaceMuted: '#F8FAFF',
-  border: '#D6DCEB',
-  text: '#1D2433',
-  textMuted: '#667089',
-  accent: '#B63A30',
-  accentSoft: '#FBEDEC',
-  disabled: '#C8D0E0',
-};
 
 type NightPhaseName = (typeof NIGHT_PHASES)[number];
 
@@ -211,6 +202,13 @@ const NIGHT_GUIDE_STEPS: NightGuideStep[] = [
     requiresRole: 'Werewolf',
   },
   {
+    id: 'hunter',
+    title: 'Hunter Marks Target',
+    call: 'Hunter wakes and picks one revenge target if your table uses this rule.',
+    notes: 'If Hunter dies, the marked target is eliminated immediately.',
+    requiresRole: 'Hunter',
+  },
+  {
     id: 'whitewolf',
     title: 'Whitewolf Action',
     call: 'Whitewolf wakes for their special action on even-numbered nights.',
@@ -232,13 +230,6 @@ const NIGHT_GUIDE_STEPS: NightGuideStep[] = [
     call: 'Enchantress wakes and marks one player according to your table rules.',
     notes: 'Resolve the enchanted effect using your chosen variant.',
     requiresRole: 'Enchantress',
-  },
-  {
-    id: 'hunter',
-    title: 'Hunter Marks Target',
-    call: 'Hunter wakes and picks one revenge target if your table uses this rule.',
-    notes: 'If Hunter dies, the marked target is eliminated immediately.',
-    requiresRole: 'Hunter',
   },
   {
     id: 'seer',
@@ -407,6 +398,8 @@ type SpecialChecklistRole = keyof typeof SPECIAL_ROLE_CHECKLISTS;
 
 type RoleEditStep = 'role' | 'player' | 'assign';
 
+type TrackerTabKey = 'players-actions' | 'guide' | 'timers' | 'special-checks';
+
 type SpecialChecklistState = Record<SpecialChecklistRole, boolean[]>;
 
 const buildInitialSpecialChecklistState = (): SpecialChecklistState => ({
@@ -468,20 +461,39 @@ const normalizeDuration = (value: string) => {
   return parsed;
 };
 
-const NIGHT_TIMER_PHASES: NightPhaseName[] = [
-  'Werewolves',
-  'Seer',
-  'Bodyguard',
-  'Witch',
-  'Cupid',
-  'Whitewolf',
-  'The Doppelgänger',
-];
-
 const DAY_TIMER_PHASES = ['Discussion', 'Vote', 'Lynch'] as const;
 type DayTimerPhase = (typeof DAY_TIMER_PHASES)[number];
 const isDayTimerPhase = (phase: NightPhaseName): phase is DayTimerPhase =>
   DAY_TIMER_PHASES.includes(phase as DayTimerPhase);
+
+const applyElapsedToPhaseTimers = (
+  previousTimers: Record<NightPhaseName, PhaseTimerState>,
+  elapsedSeconds: number,
+) => {
+  if (elapsedSeconds <= 0) {
+    return previousTimers;
+  }
+
+  return NIGHT_PHASES.reduce(
+    (accumulator, phase) => {
+      const timer = previousTimers[phase];
+
+      if (!timer.running) {
+        accumulator[phase] = timer;
+        return accumulator;
+      }
+
+      const nextRemaining = Math.max(0, timer.remaining - elapsedSeconds);
+      accumulator[phase] = {
+        remaining: nextRemaining,
+        running: nextRemaining > 0,
+      };
+
+      return accumulator;
+    },
+    {} as Record<NightPhaseName, PhaseTimerState>,
+  );
+};
 
 const VI_PHASE_LABELS: Record<NightPhaseName, string> = {
   Werewolves: 'Ma Sói',
@@ -596,6 +608,12 @@ export default function TrackerScreen() {
     toggleLanguage,
   } = useGame();
   const t = uiText[language].tracker;
+  const playerActionsTabLabel =
+    language === 'vi' ? 'Người chơi & Hành động' : 'Players & Actions';
+  const guideTabLabel = language === 'vi' ? 'Hướng dẫn' : 'Guide';
+  const timersTabLabel = language === 'vi' ? 'Bộ đếm giờ' : 'Timers';
+  const specialChecksTabLabel =
+    language === 'vi' ? 'Kiểm tra vai đặc biệt' : 'Special Role Checks';
   const localizedRoleLabel = (role: RoleName) => getRoleLabel(language, role);
   const phaseLabel = (phase: NightPhaseName) =>
     language === 'vi' ? VI_PHASE_LABELS[phase] : phase;
@@ -617,7 +635,8 @@ export default function TrackerScreen() {
   const [dayTimerInputs, setDayTimerInputs] = useState<
     Record<DayTimerPhase, string>
   >(buildDefaultDayTimerInputs);
-  const [showNightTimers, setShowNightTimers] = useState(false);
+  const [activeTrackerTab, setActiveTrackerTab] =
+    useState<TrackerTabKey>('players-actions');
   const [specialChecklistState, setSpecialChecklistState] = useState(
     buildInitialSpecialChecklistState,
   );
@@ -893,37 +912,70 @@ export default function TrackerScreen() {
     NightPhaseName,
     PhaseTimerState
   > | null>(null);
+  const timerLastSyncedAtRef = useRef<number | null>(null);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const apprenticePromotionLogRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!hasRunningTimer) {
+      timerLastSyncedAtRef.current = null;
       return;
     }
 
+    timerLastSyncedAtRef.current = Date.now();
+
     const intervalId = setInterval(() => {
+      const now = Date.now();
+      const lastSyncedAt = timerLastSyncedAtRef.current ?? now;
+      const elapsedSeconds = Math.floor((now - lastSyncedAt) / 1000);
+
+      if (elapsedSeconds <= 0) {
+        return;
+      }
+
+      timerLastSyncedAtRef.current = lastSyncedAt + elapsedSeconds * 1000;
       setPhaseTimers((previousTimers) =>
-        NIGHT_PHASES.reduce(
-          (accumulator, phase) => {
-            const timer = previousTimers[phase];
-            if (!timer.running) {
-              accumulator[phase] = timer;
-              return accumulator;
-            }
-
-            const nextRemaining = Math.max(0, timer.remaining - 1);
-            accumulator[phase] = {
-              remaining: nextRemaining,
-              running: nextRemaining > 0,
-            };
-
-            return accumulator;
-          },
-          {} as Record<NightPhaseName, PhaseTimerState>,
-        ),
+        applyElapsedToPhaseTimers(previousTimers, elapsedSeconds),
       );
-    }, 1000);
+    }, 250);
 
     return () => clearInterval(intervalId);
+  }, [hasRunningTimer]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      const previousState = appStateRef.current;
+      appStateRef.current = nextState;
+
+      if (!hasRunningTimer) {
+        return;
+      }
+
+      if (
+        (previousState === 'inactive' || previousState === 'background') &&
+        nextState === 'active'
+      ) {
+        const now = Date.now();
+        const lastSyncedAt = timerLastSyncedAtRef.current ?? now;
+        const elapsedSeconds = Math.floor((now - lastSyncedAt) / 1000);
+
+        timerLastSyncedAtRef.current = now;
+
+        if (elapsedSeconds > 0) {
+          setPhaseTimers((previousTimers) =>
+            applyElapsedToPhaseTimers(previousTimers, elapsedSeconds),
+          );
+        }
+
+        return;
+      }
+
+      if (nextState === 'active') {
+        timerLastSyncedAtRef.current = Date.now();
+      }
+    });
+
+    return () => subscription.remove();
   }, [hasRunningTimer]);
 
   useEffect(() => {
@@ -1049,16 +1101,6 @@ export default function TrackerScreen() {
         running: false,
       },
     }));
-  };
-
-  const applyDurationToAllPhases = () => {
-    const configuredDuration = normalizeDuration(phaseDurationInput);
-    setPhaseTimers(buildInitialPhaseTimers(configuredDuration));
-    setDayTimerInputs({
-      Discussion: String(configuredDuration),
-      Vote: String(configuredDuration),
-      Lynch: String(configuredDuration),
-    });
   };
 
   const applyDayTimerDuration = (phase: DayTimerPhase) => {
@@ -1816,28 +1858,18 @@ export default function TrackerScreen() {
       );
     }
 
-    if (
-      Object.prototype.hasOwnProperty.call(
-        lastAppliedAction,
-        'previousPendingDoppelCopy',
-      )
-    ) {
+    if (Object.hasOwn(lastAppliedAction, 'previousPendingDoppelCopy')) {
       setPendingDoppelCopy(lastAppliedAction.previousPendingDoppelCopy ?? null);
     }
 
-    if (
-      Object.prototype.hasOwnProperty.call(
-        lastAppliedAction,
-        'previousPendingHunterRevenge',
-      )
-    ) {
+    if (Object.hasOwn(lastAppliedAction, 'previousPendingHunterRevenge')) {
       setPendingHunterRevenge(
         lastAppliedAction.previousPendingHunterRevenge ?? null,
       );
     }
 
     if (
-      Object.prototype.hasOwnProperty.call(
+      Object.hasOwn(
         lastAppliedAction,
         'previousPendingCursedTransformPlayerIds',
       )
@@ -2064,7 +2096,6 @@ export default function TrackerScreen() {
     setPhaseDurationInput(String(DEFAULT_PHASE_SECONDS));
     setPhaseTimers(buildDefaultPhaseTimers());
     setDayTimerInputs(buildDefaultDayTimerInputs());
-    setShowNightTimers(false);
     setSpecialChecklistState(buildInitialSpecialChecklistState());
     setCurrentNight(1);
     setNightNoteInput('');
@@ -2119,7 +2150,7 @@ export default function TrackerScreen() {
     let secondaryNextRole: RoleName | undefined;
     let inheritanceNote = '';
 
-    if (pendingDoppelCopy && pendingDoppelCopy.targetId === deadPlayerId) {
+    if (pendingDoppelCopy?.targetId === deadPlayerId) {
       const doppelPlayer = tracker.find(
         (player) => player.id === pendingDoppelCopy.doppelId,
       );
@@ -2393,7 +2424,7 @@ export default function TrackerScreen() {
     }
 
     const linkedLover = tracker.find((player) => player.id === linkedLoverId);
-    if (!linkedLover || !linkedLover.alive) {
+    if (!linkedLover?.alive) {
       return {
         tertiaryChangedAlive,
         tertiaryAliveChangePlayerId,
@@ -2735,7 +2766,7 @@ export default function TrackerScreen() {
     const hunter = tracker.find((player) => player.id === hunterSourcePlayerId);
     const target = tracker.find((player) => player.id === targetPlayerId);
 
-    if (!hunter || !target || !target.alive) {
+    if (!hunter || !target?.alive) {
       setIsHunterTargetModalVisible(false);
       setHunterSourcePlayerId(null);
       return;
@@ -3628,278 +3659,378 @@ export default function TrackerScreen() {
       >
         <Text style={styles.screenTitle}>{t.title}</Text>
 
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>{t.nightGuideTitle}</Text>
-          <Text style={styles.sectionSubtitle}>
-            {t.nightGuideSubtitle} {currentNight}.
-          </Text>
+        <View style={styles.trackerTabsRow}>
+          <Pressable
+            style={[
+              styles.trackerTabButton,
+              { width: gridItemWidth },
+              activeTrackerTab === 'players-actions' &&
+                styles.trackerTabButtonActive,
+            ]}
+            onPress={() => setActiveTrackerTab('players-actions')}
+          >
+            <Text
+              style={[
+                styles.trackerTabButtonText,
+                activeTrackerTab === 'players-actions' &&
+                  styles.trackerTabButtonTextActive,
+              ]}
+            >
+              {playerActionsTabLabel}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[
+              styles.trackerTabButton,
+              { width: gridItemWidth },
+              activeTrackerTab === 'guide' && styles.trackerTabButtonActive,
+            ]}
+            onPress={() => setActiveTrackerTab('guide')}
+          >
+            <Text
+              style={[
+                styles.trackerTabButtonText,
+                activeTrackerTab === 'guide' &&
+                  styles.trackerTabButtonTextActive,
+              ]}
+            >
+              {guideTabLabel}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[
+              styles.trackerTabButton,
+              { width: gridItemWidth },
+              activeTrackerTab === 'timers' && styles.trackerTabButtonActive,
+            ]}
+            onPress={() => setActiveTrackerTab('timers')}
+          >
+            <Text
+              style={[
+                styles.trackerTabButtonText,
+                activeTrackerTab === 'timers' &&
+                  styles.trackerTabButtonTextActive,
+              ]}
+            >
+              {timersTabLabel}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[
+              styles.trackerTabButton,
+              { width: gridItemWidth },
+              activeTrackerTab === 'special-checks' &&
+                styles.trackerTabButtonActive,
+            ]}
+            onPress={() => setActiveTrackerTab('special-checks')}
+          >
+            <Text
+              style={[
+                styles.trackerTabButtonText,
+                activeTrackerTab === 'special-checks' &&
+                  styles.trackerTabButtonTextActive,
+              ]}
+            >
+              {specialChecksTabLabel}
+            </Text>
+          </Pressable>
+        </View>
 
-          <View style={styles.nightGuideList}>
-            {nightGuideSteps.map((step, index) => {
-              const localizedStep = localizedNightGuideStep(step);
+        {activeTrackerTab === 'guide' && (
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>{t.nightGuideTitle}</Text>
+            <Text style={styles.sectionSubtitle}>
+              {t.nightGuideSubtitle} {currentNight}.
+            </Text>
 
-              return (
-                <View key={step.id} style={styles.nightGuideItem}>
-                  <Text style={styles.nightGuideItemTitle}>
-                    {index + 1}. {localizedStep.title}
+            <View style={styles.nightGuideList}>
+              {nightGuideSteps.map((step, index) => {
+                const localizedStep = localizedNightGuideStep(step);
+
+                return (
+                  <View key={step.id} style={styles.nightGuideItem}>
+                    <Text style={styles.nightGuideItemTitle}>
+                      {index + 1}. {localizedStep.title}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        )}
+
+        {activeTrackerTab === 'timers' && (
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>{t.phaseTimersTitle}</Text>
+            <Text style={styles.sectionSubtitle}>{t.phaseTimersSubtitle}</Text>
+            <View style={styles.gridContainer}>
+              {DAY_TIMER_PHASES.map(renderPhaseCard)}
+            </View>
+          </View>
+        )}
+
+        {activeTrackerTab === 'players-actions' && (
+          <>
+            <View style={styles.gridContainer}>
+              {tracker.map((player) => (
+                <Pressable
+                  key={player.id}
+                  style={[
+                    styles.playerCard,
+                    { width: gridItemWidth },
+                    (player.role === 'Werewolf' ||
+                      player.role === 'Whitewolf') &&
+                      styles.playerCardWolf,
+                    !player.alive && styles.playerCardDead,
+                  ]}
+                  onPress={() => setSelectedPlayerId(player.id)}
+                >
+                  <View>
+                    <Text
+                      style={[
+                        styles.playerName,
+                        !player.alive && styles.playerNameDead,
+                      ]}
+                    >
+                      {player.name}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.playerRole,
+                        !player.alive && styles.playerRoleDead,
+                      ]}
+                    >
+                      {localizedRoleLabel(player.role)}
+                    </Text>
+                    {SPECIAL_ROLE_ICONS[player.role] && (
+                      <View style={styles.roleIconWrap}>
+                        <Text style={styles.roleIconText}>
+                          {SPECIAL_ROLE_ICONS[player.role]}
+                        </Text>
+                      </View>
+                    )}
+                    {seerCheckedPlayerIds.includes(player.id) && (
+                      <View style={styles.checkedIconWrap}>
+                        <Text style={styles.checkedIconText}>
+                          {STATUS_BADGE_ICONS.checked}
+                        </Text>
+                      </View>
+                    )}
+                    {enchantressMarkedPlayerIds.includes(player.id) && (
+                      <View style={styles.enchantedIconWrap}>
+                        <Text style={styles.enchantedIconText}>
+                          {STATUS_BADGE_ICONS.enchanted}
+                        </Text>
+                      </View>
+                    )}
+                    {doppelCopiedPlayerIds.includes(player.id) && (
+                      <View style={styles.copiedIconWrap}>
+                        <Text style={styles.copiedIconText}>
+                          {STATUS_BADGE_ICONS.copied}
+                        </Text>
+                      </View>
+                    )}
+                    {cupidLinkedPlayerIds.includes(player.id) && (
+                      <View style={styles.loverIconWrap}>
+                        <Text style={styles.loverIconText}>
+                          {STATUS_BADGE_ICONS.lover}
+                        </Text>
+                      </View>
+                    )}
+                    {bodyguardProtectedPlayerIds.includes(player.id) && (
+                      <View style={styles.protectedIconWrap}>
+                        <Text style={styles.protectedIconText}>
+                          {STATUS_BADGE_ICONS.protected}
+                        </Text>
+                      </View>
+                    )}
+                    {player.role === 'Strongman' && (
+                      <View style={styles.strongmanIconWrap}>
+                        <Text style={styles.strongmanIconText}>
+                          {strongmanSurvivedPlayerIds.includes(player.id)
+                            ? STATUS_BADGE_ICONS.strongmanPending
+                            : STATUS_BADGE_ICONS.strongman}
+                        </Text>
+                      </View>
+                    )}
+                    {pendingCursedTransformPlayerIds.includes(player.id) && (
+                      <View style={styles.cursedPendingIconWrap}>
+                        <Text style={styles.cursedPendingIconText}>
+                          {STATUS_BADGE_ICONS.cursedPending}
+                        </Text>
+                      </View>
+                    )}
+                    {player.role === 'Elder' && (
+                      <View style={styles.elderIconWrap}>
+                        <Text style={styles.elderIconText}>
+                          {STATUS_BADGE_ICONS.elder}
+                        </Text>
+                      </View>
+                    )}
+                    {pendingHunterRevenge?.targetId === player.id && (
+                      <View style={styles.hunterTargetIconWrap}>
+                        <Text style={styles.hunterTargetIconText}>
+                          {STATUS_BADGE_ICONS.hunterTarget}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  <View
+                    style={[
+                      styles.playerDot,
+                      player.alive
+                        ? styles.playerDotAlive
+                        : styles.playerDotDead,
+                    ]}
+                  />
+                </Pressable>
+              ))}
+            </View>
+
+            <View style={styles.sectionCard}>
+              <View style={styles.nightHeaderRow}>
+                <View>
+                  <Text style={styles.sectionTitle}>{t.developmentsTitle}</Text>
+                  <Text style={styles.sectionSubtitle}>
+                    {t.currentNight}: {currentNight}
                   </Text>
                 </View>
-              );
-            })}
-          </View>
-        </View>
+              </View>
 
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>{t.phaseTimersTitle}</Text>
-          <Text style={styles.sectionSubtitle}>{t.phaseTimersSubtitle}</Text>
-          <View style={styles.gridContainer}>
-            {DAY_TIMER_PHASES.map(renderPhaseCard)}
-          </View>
-        </View>
+              <TextInput
+                value={nightNoteInput}
+                onChangeText={setNightNoteInput}
+                placeholder={t.notePlaceholder}
+                placeholderTextColor="#687089"
+                multiline
+                style={styles.nightNoteInput}
+              />
 
-        {activeSpecialChecklistRoles.length > 0 && (
+              <View style={styles.nightActionRow}>
+                <Pressable
+                  style={styles.addNightNoteButton}
+                  onPress={addNightNote}
+                >
+                  <Text style={styles.addNightNoteButtonText}>{t.addNote}</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.clearNightLogButton}
+                  onPress={clearNightLog}
+                >
+                  <Text style={styles.clearNightLogButtonText}>
+                    {t.clearLog}
+                  </Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.undoRow}>
+                <Pressable
+                  style={[
+                    styles.undoButton,
+                    !lastAppliedAction && styles.undoButtonDisabled,
+                  ]}
+                  disabled={!lastAppliedAction}
+                  onPress={undoLastAction}
+                >
+                  <Text
+                    style={[
+                      styles.undoButtonText,
+                      !lastAppliedAction && styles.undoButtonTextDisabled,
+                    ]}
+                  >
+                    {t.undo}
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.viewLogButton}
+                  onPress={openNightLogModal}
+                >
+                  <Text style={styles.viewLogButtonText}>{t.viewLog}</Text>
+                </Pressable>
+              </View>
+            </View>
+          </>
+        )}
+
+        {activeTrackerTab === 'special-checks' && (
           <View style={styles.sectionCard}>
             <Text style={styles.sectionTitle}>{t.specialChecksTitle}</Text>
             <Text style={styles.sectionSubtitle}>
               {t.specialChecksSubtitle}
             </Text>
 
-            <View style={styles.gridContainer}>
-              {activeSpecialChecklistRoles.map((role) => (
-                <View
-                  key={role}
-                  style={[styles.specialRoleCard, { width: gridItemWidth }]}
-                >
-                  <Text style={styles.specialRoleTitle}>
-                    {localizedRoleLabel(role)}
-                  </Text>
+            {activeSpecialChecklistRoles.length > 0 ? (
+              <View style={styles.gridContainer}>
+                {activeSpecialChecklistRoles.map((role) => (
+                  <View
+                    key={role}
+                    style={[styles.specialRoleCard, { width: gridItemWidth }]}
+                  >
+                    <Text style={styles.specialRoleTitle}>
+                      {localizedRoleLabel(role)}
+                    </Text>
 
-                  {SPECIAL_ROLE_CHECKLISTS[role].map((checkLabel, index) => {
-                    const checked = specialChecklistState[role][index];
+                    {SPECIAL_ROLE_CHECKLISTS[role].map((checkLabel, index) => {
+                      const checked = specialChecklistState[role][index];
 
-                    return (
-                      <Pressable
-                        key={`${role}-${checkLabel}`}
-                        style={styles.checkRow}
-                        onPress={() => toggleSpecialChecklistItem(role, index)}
-                      >
-                        <View
-                          style={[
-                            styles.checkbox,
-                            checked && styles.checkboxChecked,
-                          ]}
+                      return (
+                        <Pressable
+                          key={`${role}-${checkLabel}`}
+                          style={styles.checkRow}
+                          onPress={() =>
+                            toggleSpecialChecklistItem(role, index)
+                          }
                         >
-                          {checked && (
-                            <Text style={styles.checkboxMark}>✓</Text>
-                          )}
-                        </View>
-                        <Text
-                          style={[
-                            styles.checkLabel,
-                            checked && styles.checkLabelChecked,
-                          ]}
-                        >
-                          {localizedChecklistLabel(checkLabel)}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-
-                  {role === 'Cupid' && cupidLinkedPlayerIds.length > 0 && (
-                    <View style={styles.linkedLoversWrap}>
-                      <Text style={styles.linkedLoversLabel}>
-                        {t.linkedLovers}
-                      </Text>
-                      {cupidLinkedPlayerIds.map((id) => {
-                        const playerName =
-                          tracker.find((player) => player.id === id)?.name ??
-                          id;
-
-                        return (
-                          <Text
-                            key={`lover-${id}`}
-                            style={styles.linkedLoversName}
+                          <View
+                            style={[
+                              styles.checkbox,
+                              checked && styles.checkboxChecked,
+                            ]}
                           >
-                            - {playerName}
+                            {checked && (
+                              <Text style={styles.checkboxMark}>✓</Text>
+                            )}
+                          </View>
+                          <Text
+                            style={[
+                              styles.checkLabel,
+                              checked && styles.checkLabelChecked,
+                            ]}
+                          >
+                            {localizedChecklistLabel(checkLabel)}
                           </Text>
-                        );
-                      })}
-                    </View>
-                  )}
-                </View>
-              ))}
-            </View>
+                        </Pressable>
+                      );
+                    })}
+
+                    {role === 'Cupid' && cupidLinkedPlayerIds.length > 0 && (
+                      <View style={styles.linkedLoversWrap}>
+                        <Text style={styles.linkedLoversLabel}>
+                          {t.linkedLovers}
+                        </Text>
+                        {cupidLinkedPlayerIds.map((id) => {
+                          const playerName =
+                            tracker.find((player) => player.id === id)?.name ??
+                            id;
+
+                          return (
+                            <Text
+                              key={`lover-${id}`}
+                              style={styles.linkedLoversName}
+                            >
+                              - {playerName}
+                            </Text>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </View>
+                ))}
+              </View>
+            ) : null}
           </View>
         )}
-
-        <View style={styles.sectionCard}>
-          <View style={styles.nightHeaderRow}>
-            <View>
-              <Text style={styles.sectionTitle}>{t.developmentsTitle}</Text>
-              <Text style={styles.sectionSubtitle}>
-                {t.currentNight}: {currentNight}
-              </Text>
-            </View>
-          </View>
-
-          <TextInput
-            value={nightNoteInput}
-            onChangeText={setNightNoteInput}
-            placeholder={t.notePlaceholder}
-            placeholderTextColor="#687089"
-            multiline
-            style={styles.nightNoteInput}
-          />
-
-          <View style={styles.nightActionRow}>
-            <Pressable style={styles.addNightNoteButton} onPress={addNightNote}>
-              <Text style={styles.addNightNoteButtonText}>{t.addNote}</Text>
-            </Pressable>
-            <Pressable
-              style={styles.clearNightLogButton}
-              onPress={clearNightLog}
-            >
-              <Text style={styles.clearNightLogButtonText}>{t.clearLog}</Text>
-            </Pressable>
-          </View>
-
-          <View style={styles.undoRow}>
-            <Pressable
-              style={[
-                styles.undoButton,
-                !lastAppliedAction && styles.undoButtonDisabled,
-              ]}
-              disabled={!lastAppliedAction}
-              onPress={undoLastAction}
-            >
-              <Text
-                style={[
-                  styles.undoButtonText,
-                  !lastAppliedAction && styles.undoButtonTextDisabled,
-                ]}
-              >
-                {t.undo}
-              </Text>
-            </Pressable>
-
-            <Pressable style={styles.viewLogButton} onPress={openNightLogModal}>
-              <Text style={styles.viewLogButtonText}>{t.viewLog}</Text>
-            </Pressable>
-          </View>
-        </View>
-
-        <View style={styles.gridContainer}>
-          {tracker.map((player) => (
-            <Pressable
-              key={player.id}
-              style={[
-                styles.playerCard,
-                { width: gridItemWidth },
-                (player.role === 'Werewolf' || player.role === 'Whitewolf') &&
-                  styles.playerCardWolf,
-                !player.alive && styles.playerCardDead,
-              ]}
-              onPress={() => setSelectedPlayerId(player.id)}
-            >
-              <View>
-                <Text
-                  style={[
-                    styles.playerName,
-                    !player.alive && styles.playerNameDead,
-                  ]}
-                >
-                  {player.name}
-                </Text>
-                <Text
-                  style={[
-                    styles.playerRole,
-                    !player.alive && styles.playerRoleDead,
-                  ]}
-                >
-                  {localizedRoleLabel(player.role)}
-                </Text>
-                {SPECIAL_ROLE_ICONS[player.role] && (
-                  <View style={styles.roleIconWrap}>
-                    <Text style={styles.roleIconText}>
-                      {SPECIAL_ROLE_ICONS[player.role]}
-                    </Text>
-                  </View>
-                )}
-                {seerCheckedPlayerIds.includes(player.id) && (
-                  <View style={styles.checkedIconWrap}>
-                    <Text style={styles.checkedIconText}>
-                      {STATUS_BADGE_ICONS.checked}
-                    </Text>
-                  </View>
-                )}
-                {enchantressMarkedPlayerIds.includes(player.id) && (
-                  <View style={styles.enchantedIconWrap}>
-                    <Text style={styles.enchantedIconText}>
-                      {STATUS_BADGE_ICONS.enchanted}
-                    </Text>
-                  </View>
-                )}
-                {doppelCopiedPlayerIds.includes(player.id) && (
-                  <View style={styles.copiedIconWrap}>
-                    <Text style={styles.copiedIconText}>
-                      {STATUS_BADGE_ICONS.copied}
-                    </Text>
-                  </View>
-                )}
-                {cupidLinkedPlayerIds.includes(player.id) && (
-                  <View style={styles.loverIconWrap}>
-                    <Text style={styles.loverIconText}>
-                      {STATUS_BADGE_ICONS.lover}
-                    </Text>
-                  </View>
-                )}
-                {bodyguardProtectedPlayerIds.includes(player.id) && (
-                  <View style={styles.protectedIconWrap}>
-                    <Text style={styles.protectedIconText}>
-                      {STATUS_BADGE_ICONS.protected}
-                    </Text>
-                  </View>
-                )}
-                {player.role === 'Strongman' && (
-                  <View style={styles.strongmanIconWrap}>
-                    <Text style={styles.strongmanIconText}>
-                      {strongmanSurvivedPlayerIds.includes(player.id)
-                        ? STATUS_BADGE_ICONS.strongmanPending
-                        : STATUS_BADGE_ICONS.strongman}
-                    </Text>
-                  </View>
-                )}
-                {pendingCursedTransformPlayerIds.includes(player.id) && (
-                  <View style={styles.cursedPendingIconWrap}>
-                    <Text style={styles.cursedPendingIconText}>
-                      {STATUS_BADGE_ICONS.cursedPending}
-                    </Text>
-                  </View>
-                )}
-                {player.role === 'Elder' && (
-                  <View style={styles.elderIconWrap}>
-                    <Text style={styles.elderIconText}>
-                      {STATUS_BADGE_ICONS.elder}
-                    </Text>
-                  </View>
-                )}
-                {pendingHunterRevenge?.targetId === player.id && (
-                  <View style={styles.hunterTargetIconWrap}>
-                    <Text style={styles.hunterTargetIconText}>
-                      {STATUS_BADGE_ICONS.hunterTarget}
-                    </Text>
-                  </View>
-                )}
-              </View>
-              <View
-                style={[
-                  styles.playerDot,
-                  player.alive ? styles.playerDotAlive : styles.playerDotDead,
-                ]}
-              />
-            </Pressable>
-          ))}
-        </View>
       </ScrollView>
 
       <Modal
@@ -4610,6 +4741,35 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textMuted,
   },
+  trackerTabsRow: {
+    marginTop: 12,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  trackerTabButton: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    backgroundColor: COLORS.surfaceMuted,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  trackerTabButtonActive: {
+    borderColor: COLORS.accent,
+    backgroundColor: COLORS.accentSoft,
+  },
+  trackerTabButtonText: {
+    color: COLORS.text,
+    fontSize: 12,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  trackerTabButtonTextActive: {
+    color: COLORS.accent,
+  },
   strongmanHintText: {
     marginTop: 4,
     fontSize: 12,
@@ -5025,11 +5185,11 @@ const styles = StyleSheet.create({
     borderColor: '#D9DDE8',
     borderRadius: 12,
     backgroundColor: '#F7F8FC',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    minHeight: 192,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    minHeight: 66,
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
   },
   playerCardWolf: {
@@ -5039,7 +5199,7 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   playerName: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     color: '#1E2433',
   },
@@ -5048,22 +5208,22 @@ const styles = StyleSheet.create({
     textDecorationLine: 'line-through',
   },
   playerRole: {
-    marginTop: 4,
-    fontSize: 12,
+    marginTop: 2,
+    fontSize: 11,
     color: '#687089',
   },
   roleIconWrap: {
-    marginTop: 4,
+    marginTop: 3,
     alignSelf: 'flex-start',
     borderWidth: 1,
     borderColor: '#D9DDE8',
     borderRadius: 999,
     backgroundColor: '#FFFFFF',
-    paddingHorizontal: 16,
-    paddingVertical: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 2,
   },
   roleIconText: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '700',
     color: '#1E2433',
   },
@@ -5206,8 +5366,9 @@ const styles = StyleSheet.create({
     color: '#7A4E00',
   },
   playerDot: {
-    width: 12,
-    height: 12,
+    width: 10,
+    height: 10,
+    marginTop: 2,
     borderRadius: 999,
   },
   playerDotAlive: {
